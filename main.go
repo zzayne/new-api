@@ -112,6 +112,9 @@ func main() {
 	// Subscription quota reset task (daily/weekly/monthly/custom)
 	service.StartSubscriptionQuotaResetTask()
 
+	// Initialize relay stats collector with in-memory implementation
+	service.InitRelayStats()
+
 	// Wire task polling adaptor factory (breaks service -> relay import cycle)
 	service.GetTaskAdaptorFunc = func(platform constant.TaskPlatform) service.TaskPollingAdaptor {
 		a := relay.GetTaskAdaptor(platform)
@@ -155,6 +158,15 @@ func main() {
 	server := gin.New()
 	server.Use(gin.CustomRecovery(func(c *gin.Context, err any) {
 		common.SysLog(fmt.Sprintf("panic detected: %v", err))
+		service.SafeCollectAttempt(service.GetRelayStatsCollector(), service.AttemptEvent{
+			RequestID:    c.GetString(common.RequestIdKey),
+			ModelName:    c.GetString("model"),
+			ChannelID:    c.GetInt("channel_id"),
+			Success:      false,
+			ErrorCode:    "panic",
+			ErrorMessage: fmt.Sprintf("%v", err),
+			ErrorLevel:   3,
+		})
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error": gin.H{
 				"message": fmt.Sprintf("Panic detected, error: %v. Please submit a issue here: https://github.com/Calcium-Ion/new-api", err),
