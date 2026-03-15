@@ -472,6 +472,22 @@ func updateVideoSingleTask(ctx context.Context, adaptor TaskPollingAdaptor, ch *
 
 	isDone := task.Status == model.TaskStatusSuccess || task.Status == model.TaskStatusFailure
 	if isDone && snap.Status != task.Status {
+		var execDur time.Duration
+		if task.FinishTime > 0 && task.SubmitTime > 0 {
+			execDur = time.Duration(task.FinishTime-task.SubmitTime) * time.Second
+		}
+		SafeCollectTaskExecution(GetRelayStatsCollector(), TaskExecutionEvent{
+			TaskID:            task.TaskID,
+			Platform:          task.Platform,
+			ModelName:         task.Properties.OriginModelName,
+			ChannelID:         task.ChannelId,
+			Group:             task.Group,
+			Success:           task.Status == model.TaskStatusSuccess,
+			FailReason:        task.FailReason,
+			SubmitTime:        task.SubmitTime,
+			FinishTime:        task.FinishTime,
+			ExecutionDuration: execDur,
+		})
 		won, err := task.UpdateWithStatus(snap.Status)
 		if err != nil {
 			logger.LogError(ctx, fmt.Sprintf("UpdateWithStatus failed for task %s: %s", task.TaskID, err.Error()))

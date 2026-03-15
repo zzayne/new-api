@@ -186,6 +186,18 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 	relayInfo.RetryIndex = 0
 	relayInfo.LastError = nil
 
+	collector := service.GetRelayStatsCollector()
+	requestStart := time.Now()
+	var (
+		channelChain     []int
+		firstErrCode     string
+		firstErrStatus   int
+		excludedAttempts int
+		realErrAttempts  int
+		totalAttempts    int
+		hadError         bool
+	)
+
 	for ; retryParam.GetRetry() <= common.RetryTimes; retryParam.IncreaseRetry() {
 		relayInfo.RetryIndex = retryParam.GetRetry()
 		channel, channelErr := getChannel(c, relayInfo, retryParam)
@@ -196,6 +208,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		}
 
 		addUsedChannel(c, channel.Id)
+		channelChain = append(channelChain, channel.Id)
 		bodyStorage, bodyErr := common.GetBodyStorage(c)
 		if bodyErr != nil {
 			// Ensure consistent 413 for oversized bodies even when error occurs later (e.g., retry path)
@@ -208,6 +221,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		}
 		c.Request.Body = io.NopCloser(bodyStorage)
 
+		attemptStart := time.Now()
 		switch relayFormat {
 		case types.RelayFormatOpenAIRealtime:
 			newAPIError = relay.WssHelper(c, relayInfo)
@@ -218,14 +232,72 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		default:
 			newAPIError = relayHandler(c, relayInfo)
 		}
+		attemptDuration := time.Since(attemptStart)
+		totalAttempts++
 
 		if newAPIError == nil {
 			relayInfo.LastError = nil
+			service.SafeCollectAttempt(collector, service.AttemptEvent{
+				RequestID:    requestId,
+				AttemptIndex: retryParam.GetRetry(),
+				ChannelID:    channel.Id,
+				ChannelType:  channel.Type,
+				ChannelName:  channel.Name,
+				ModelName:    relayInfo.OriginModelName,
+				Group:        relayInfo.UsingGroup,
+				Success:      true,
+				Duration:     attemptDuration,
+			})
+			service.SafeCollectRequestComplete(collector, service.RequestCompleteEvent{
+				RequestID:            requestId,
+				UserID:               relayInfo.UserId,
+				TokenID:              relayInfo.TokenId,
+				Group:                relayInfo.UsingGroup,
+				OriginalModel:        relayInfo.OriginModelName,
+				RelayMode:            relayInfo.RelayMode,
+				TotalAttempts:        totalAttempts,
+				FinalSuccess:         true,
+				HasRetry:             totalAttempts > 1,
+				RetryRecovered:       hadError,
+				ChannelChain:         channelChain,
+				TotalDuration:        time.Since(requestStart),
+				FirstErrorCode:       firstErrCode,
+				FirstErrorStatusCode: firstErrStatus,
+				ExcludedAttempts:     excludedAttempts,
+				RealErrorAttempts:    realErrAttempts,
+			})
 			return
 		}
 
 		newAPIError = service.NormalizeViolationFeeError(newAPIError)
 		relayInfo.LastError = newAPIError
+		hadError = true
+
+		evt := service.AttemptEvent{
+			RequestID:    requestId,
+			AttemptIndex: retryParam.GetRetry(),
+			ChannelID:    channel.Id,
+			ChannelType:  channel.Type,
+			ChannelName:  channel.Name,
+			ModelName:    relayInfo.OriginModelName,
+			Group:        relayInfo.UsingGroup,
+			Success:      false,
+			StatusCode:   newAPIError.StatusCode,
+			ErrorCode:    string(newAPIError.GetErrorCode()),
+			ErrorType:    string(newAPIError.GetErrorType()),
+			ErrorMessage: newAPIError.Error(),
+			Duration:     attemptDuration,
+		}
+		service.SafeCollectAttempt(collector, evt)
+		if evt.Excluded {
+			excludedAttempts++
+		} else {
+			realErrAttempts++
+		}
+		if firstErrCode == "" {
+			firstErrCode = string(newAPIError.GetErrorCode())
+			firstErrStatus = newAPIError.StatusCode
+		}
 
 		processChannelError(c, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, common.GetContextKeyString(c, constant.ContextKeyChannelKey), channel.GetAutoBan()), newAPIError)
 
@@ -233,6 +305,24 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			break
 		}
 	}
+
+	service.SafeCollectRequestComplete(collector, service.RequestCompleteEvent{
+		RequestID:            requestId,
+		UserID:               relayInfo.UserId,
+		TokenID:              relayInfo.TokenId,
+		Group:                relayInfo.UsingGroup,
+		OriginalModel:        relayInfo.OriginModelName,
+		RelayMode:            relayInfo.RelayMode,
+		TotalAttempts:        totalAttempts,
+		FinalSuccess:         false,
+		HasRetry:             totalAttempts > 1,
+		ChannelChain:         channelChain,
+		TotalDuration:        time.Since(requestStart),
+		FirstErrorCode:       firstErrCode,
+		FirstErrorStatusCode: firstErrStatus,
+		ExcludedAttempts:     excludedAttempts,
+		RealErrorAttempts:    realErrAttempts,
+	})
 
 	useChannel := c.GetStringSlice("use_channel")
 	if len(useChannel) > 1 {
@@ -406,6 +496,7 @@ func RelayMidjourney(c *gin.Context) {
 		return
 	}
 
+	mjStart := time.Now()
 	var mjErr *dto.MidjourneyResponse
 	switch relayInfo.RelayMode {
 	case relayconstant.RelayModeMidjourneyNotify:
@@ -419,7 +510,50 @@ func RelayMidjourney(c *gin.Context) {
 	default:
 		mjErr = relay.RelayMidjourneySubmit(c, relayInfo)
 	}
-	//err = relayMidjourneySubmit(c, relayMode)
+	mjDuration := time.Since(mjStart)
+
+	// Collect stats for submit-type modes only
+	isSubmitMode := relayInfo.RelayMode != relayconstant.RelayModeMidjourneyNotify &&
+		relayInfo.RelayMode != relayconstant.RelayModeMidjourneyTaskFetch &&
+		relayInfo.RelayMode != relayconstant.RelayModeMidjourneyTaskFetchByCondition &&
+		relayInfo.RelayMode != relayconstant.RelayModeMidjourneyTaskImageSeed
+	if isSubmitMode {
+		mjCollector := service.GetRelayStatsCollector()
+		channelId := c.GetInt("channel_id")
+		channelType := c.GetInt("channel_type")
+		channelName := c.GetString("channel_name")
+		success := mjErr == nil
+		evt := service.AttemptEvent{
+			RequestID:   c.GetString(common.RequestIdKey),
+			ChannelID:   channelId,
+			ChannelType: channelType,
+			ChannelName: channelName,
+			ModelName:   relayInfo.OriginModelName,
+			Group:       relayInfo.UsingGroup,
+			IsAsync:     true,
+			Success:     success,
+			Duration:    mjDuration,
+		}
+		if mjErr != nil {
+			evt.StatusCode = http.StatusBadRequest
+			evt.ErrorCode = fmt.Sprintf("mj_%d", mjErr.Code)
+			evt.ErrorMessage = mjErr.Description
+		}
+		service.SafeCollectAttempt(mjCollector, evt)
+		service.SafeCollectRequestComplete(mjCollector, service.RequestCompleteEvent{
+			RequestID:     c.GetString(common.RequestIdKey),
+			UserID:        relayInfo.UserId,
+			TokenID:       relayInfo.TokenId,
+			Group:         relayInfo.UsingGroup,
+			OriginalModel: relayInfo.OriginModelName,
+			RelayMode:     relayInfo.RelayMode,
+			IsAsync:       true,
+			TotalAttempts: 1,
+			FinalSuccess:  success,
+			TotalDuration: mjDuration,
+		})
+	}
+
 	log.Println(mjErr)
 	if mjErr != nil {
 		statusCode := http.StatusBadRequest
@@ -507,6 +641,19 @@ func RelayTask(c *gin.Context) {
 		Retry:      common.GetPointer(0),
 	}
 
+	taskCollector := service.GetRelayStatsCollector()
+	taskRequestStart := time.Now()
+	taskRequestId := c.GetString(common.RequestIdKey)
+	var (
+		taskChannelChain     []int
+		taskFirstErrCode     string
+		taskFirstErrStatus   int
+		taskExcludedAttempts int
+		taskRealErrAttempts  int
+		taskTotalAttempts    int
+		taskHadError         bool
+	)
+
 	for ; retryParam.GetRetry() <= common.RetryTimes; retryParam.IncreaseRetry() {
 		var channel *model.Channel
 
@@ -529,6 +676,7 @@ func RelayTask(c *gin.Context) {
 		}
 
 		addUsedChannel(c, channel.Id)
+		taskChannelChain = append(taskChannelChain, channel.Id)
 		bodyStorage, bodyErr := common.GetBodyStorage(c)
 		if bodyErr != nil {
 			if common.IsRequestBodyTooLargeError(bodyErr) || errors.Is(bodyErr, common.ErrRequestBodyTooLarge) {
@@ -540,9 +688,52 @@ func RelayTask(c *gin.Context) {
 		}
 		c.Request.Body = io.NopCloser(bodyStorage)
 
+		taskAttemptStart := time.Now()
 		result, taskErr = relay.RelayTaskSubmit(c, relayInfo)
+		taskAttemptDuration := time.Since(taskAttemptStart)
+		taskTotalAttempts++
+
 		if taskErr == nil {
+			service.SafeCollectAttempt(taskCollector, service.AttemptEvent{
+				RequestID:    taskRequestId,
+				AttemptIndex: retryParam.GetRetry(),
+				ChannelID:    channel.Id,
+				ChannelType:  channel.Type,
+				ChannelName:  channel.Name,
+				ModelName:    relayInfo.OriginModelName,
+				Group:        relayInfo.UsingGroup,
+				IsAsync:      true,
+				Success:      true,
+				Duration:     taskAttemptDuration,
+			})
 			break
+		}
+
+		taskHadError = true
+		evt := service.AttemptEvent{
+			RequestID:    taskRequestId,
+			AttemptIndex: retryParam.GetRetry(),
+			ChannelID:    channel.Id,
+			ChannelType:  channel.Type,
+			ChannelName:  channel.Name,
+			ModelName:    relayInfo.OriginModelName,
+			Group:        relayInfo.UsingGroup,
+			IsAsync:      true,
+			Success:      false,
+			StatusCode:   taskErr.StatusCode,
+			ErrorCode:    taskErr.Code,
+			ErrorMessage: taskErr.Message,
+			Duration:     taskAttemptDuration,
+		}
+		service.SafeCollectAttempt(taskCollector, evt)
+		if evt.Excluded {
+			taskExcludedAttempts++
+		} else {
+			taskRealErrAttempts++
+		}
+		if taskFirstErrCode == "" {
+			taskFirstErrCode = taskErr.Code
+			taskFirstErrStatus = taskErr.StatusCode
 		}
 
 		if !taskErr.LocalError {
@@ -556,6 +747,27 @@ func RelayTask(c *gin.Context) {
 			break
 		}
 	}
+
+	taskFinalSuccess := taskErr == nil
+	service.SafeCollectRequestComplete(taskCollector, service.RequestCompleteEvent{
+		RequestID:            taskRequestId,
+		UserID:               relayInfo.UserId,
+		TokenID:              relayInfo.TokenId,
+		Group:                relayInfo.UsingGroup,
+		OriginalModel:        relayInfo.OriginModelName,
+		RelayMode:            relayInfo.RelayMode,
+		IsAsync:              true,
+		TotalAttempts:        taskTotalAttempts,
+		FinalSuccess:         taskFinalSuccess,
+		HasRetry:             taskTotalAttempts > 1,
+		RetryRecovered:       taskHadError && taskFinalSuccess,
+		ChannelChain:         taskChannelChain,
+		TotalDuration:        time.Since(taskRequestStart),
+		FirstErrorCode:       taskFirstErrCode,
+		FirstErrorStatusCode: taskFirstErrStatus,
+		ExcludedAttempts:     taskExcludedAttempts,
+		RealErrorAttempts:    taskRealErrAttempts,
+	})
 
 	useChannel := c.GetStringSlice("use_channel")
 	if len(useChannel) > 1 {
