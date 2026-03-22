@@ -308,6 +308,82 @@ func (m *MemoryStatsCollector) GetTimeSeries(query TimeSeriesQuery) TimeSeriesRe
 	}
 }
 
+// GetModelStats returns user-facing per-model statistics aggregated from
+// window summaries within the given unix timestamp range (0 = no filter).
+func (m *MemoryStatsCollector) GetModelStats(startTime, endTime int64) []ModelStats {
+	windows := m.summaries.Snapshot(0)
+	// Include current unflushed window so data is real-time
+	windows = append(windows, m.windowBuf.Peek()...)
+
+	type modelAgg struct {
+		totalAttempts     int64
+		successAttempts   int64
+		excludedAttempts  int64
+		totalDurationNs   int64
+		totalFirstTokenNs int64
+		firstTokenCount   int64
+		totalRequests     int64
+		successRequests   int64
+		failedRequests    int64
+	}
+	buckets := make(map[string]*modelAgg)
+
+	for _, w := range windows {
+		if startTime > 0 && w.WindowEnd.Unix() < startTime {
+			continue
+		}
+		if endTime > 0 && w.WindowStart.Unix() > endTime {
+			continue
+		}
+		if w.ModelName == "" {
+			continue
+		}
+		agg, ok := buckets[w.ModelName]
+		if !ok {
+			agg = &modelAgg{}
+			buckets[w.ModelName] = agg
+		}
+		agg.totalAttempts += w.TotalAttempts
+		agg.successAttempts += w.SuccessAttempts
+		agg.excludedAttempts += w.ExcludedAttempts
+		agg.totalDurationNs += w.TotalDurationNs
+		agg.totalFirstTokenNs += w.TotalFirstTokenNs
+		agg.firstTokenCount += w.FirstTokenCount
+		agg.totalRequests += w.TotalRequests
+		agg.successRequests += w.SuccessRequests
+		agg.failedRequests += w.FailedRequests
+	}
+
+	result := make([]ModelStats, 0, len(buckets))
+	for model, agg := range buckets {
+		// User-facing success rate = final request outcome, not per-attempt
+		var successRate float64
+		if agg.totalRequests > 0 {
+			successRate = float64(agg.successRequests) / float64(agg.totalRequests) * 100
+		} else {
+			successRate = 100
+		}
+		var avgDur float64
+		if agg.totalAttempts > 0 {
+			avgDur = float64(agg.totalDurationNs) / float64(agg.totalAttempts) / 1e6
+		}
+		var avgFT float64
+		if agg.firstTokenCount > 0 {
+			avgFT = float64(agg.totalFirstTokenNs) / float64(agg.firstTokenCount) / 1e6
+		}
+		result = append(result, ModelStats{
+			ModelName:       model,
+			SuccessRate:     successRate,
+			AvgDurationMs:   avgDur,
+			AvgFirstTokenMs: avgFT,
+			TotalRequests:   agg.totalRequests,
+			SuccessRequests: agg.successRequests,
+			FailedRequests:  agg.failedRequests,
+		})
+	}
+	return result
+}
+
 func (m *MemoryStatsCollector) Reset() {
 	m.counters.reset()
 	m.summaries.Reset()

@@ -232,48 +232,35 @@ func (wb *WindowBuffer) CollectTaskExecution(event *TaskExecutionEvent) {
 	b.taskExecDurationNs += int64(event.ExecutionDuration)
 }
 
-// Flush computes WindowSummary for all buckets and resets the buffer.
-func (wb *WindowBuffer) Flush() []WindowSummary {
-	wb.mu.Lock()
-	buckets := wb.buckets
-	windowStart := wb.windowStart
-	windowEnd := windowStart.Add(wb.windowDuration)
-	wb.buckets = make(map[windowBucketKey]*windowBucket)
-	wb.windowStart = time.Now().Truncate(wb.windowDuration)
-	wb.mu.Unlock()
-
+func buildSummaries(buckets map[windowBucketKey]*windowBucket, windowStart, windowEnd time.Time, windowSecs float64) []WindowSummary {
 	if len(buckets) == 0 {
 		return nil
 	}
-
-	windowSecs := wb.windowDuration.Seconds()
 	summaries := make([]WindowSummary, 0, len(buckets))
-
 	for key, b := range buckets {
 		s := WindowSummary{
-			WindowStart:      windowStart,
-			WindowEnd:        windowEnd,
-			ModelName:        key.ModelName,
-			ChannelID:        key.ChannelID,
-			Group:            key.Group,
-			TotalAttempts:    b.totalAttempts,
-			SuccessAttempts:  b.successAttempts,
-			FailedAttempts:   b.failedAttempts,
-			ExcludedAttempts: b.excludedAttempts,
-			ErrorLevelDist:   b.errorLevelDist,
-			TotalDurationNs:  b.totalDurationNs,
+			WindowStart:       windowStart,
+			WindowEnd:         windowEnd,
+			ModelName:         key.ModelName,
+			ChannelID:         key.ChannelID,
+			Group:             key.Group,
+			TotalAttempts:     b.totalAttempts,
+			SuccessAttempts:   b.successAttempts,
+			FailedAttempts:    b.failedAttempts,
+			ExcludedAttempts:  b.excludedAttempts,
+			ErrorLevelDist:    b.errorLevelDist,
+			TotalDurationNs:   b.totalDurationNs,
 			TotalFirstTokenNs: b.totalFirstTokenNs,
-			FirstTokenCount:  b.firstTokenCount,
-			TotalRequests:    b.totalRequests,
-			SuccessRequests:  b.successRequests,
-			FailedRequests:   b.failedRequests,
-			RetryRequests:    b.retryRequests,
-			RetryRecovered:   b.retryRecovered,
-			TaskExecCount:    b.taskExecCount,
-			TaskExecSuccess:  b.taskExecSuccess,
+			FirstTokenCount:   b.firstTokenCount,
+			TotalRequests:     b.totalRequests,
+			SuccessRequests:   b.successRequests,
+			FailedRequests:    b.failedRequests,
+			RetryRequests:     b.retryRequests,
+			RetryRecovered:    b.retryRecovered,
+			TaskExecCount:     b.taskExecCount,
+			TaskExecSuccess:   b.taskExecSuccess,
 			TaskExecDurationNs: b.taskExecDurationNs,
 		}
-
 		if b.totalAttempts > 0 {
 			s.TPS = float64(b.totalAttempts) / windowSecs
 			s.AvgDurationMs = float64(b.totalDurationNs) / float64(b.totalAttempts) / 1e6
@@ -287,10 +274,41 @@ func (wb *WindowBuffer) Flush() []WindowSummary {
 		if b.taskExecCount > 0 {
 			s.AvgExecDurationMs = float64(b.taskExecDurationNs) / float64(b.taskExecCount) / 1e6
 		}
-
 		s.ChannelScore = ComputeChannelScore(s)
 		summaries = append(summaries, s)
 	}
-
 	return summaries
+}
+
+// Flush computes WindowSummary for all buckets and resets the buffer.
+func (wb *WindowBuffer) Flush() []WindowSummary {
+	wb.mu.Lock()
+	buckets := wb.buckets
+	windowStart := wb.windowStart
+	windowEnd := windowStart.Add(wb.windowDuration)
+	wb.buckets = make(map[windowBucketKey]*windowBucket)
+	wb.windowStart = time.Now().Truncate(wb.windowDuration)
+	wb.mu.Unlock()
+
+	return buildSummaries(buckets, windowStart, windowEnd, wb.windowDuration.Seconds())
+}
+
+// Peek returns a snapshot of the current (unflushed) window as summaries,
+// without resetting the buffer. Used to include real-time data in queries.
+func (wb *WindowBuffer) Peek() []WindowSummary {
+	wb.mu.Lock()
+	now := time.Now()
+	elapsed := now.Sub(wb.windowStart).Seconds()
+	if elapsed <= 0 {
+		elapsed = 1
+	}
+	snapshot := make(map[windowBucketKey]*windowBucket, len(wb.buckets))
+	for k, b := range wb.buckets {
+		copy := *b
+		snapshot[k] = &copy
+	}
+	windowStart := wb.windowStart
+	wb.mu.Unlock()
+
+	return buildSummaries(snapshot, windowStart, now, elapsed)
 }
