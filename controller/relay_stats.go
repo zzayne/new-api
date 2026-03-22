@@ -223,6 +223,48 @@ func UpdateStatsExclusionRules(c *gin.Context) {
 	})
 }
 
+// GetUserModelStats returns per-model statistics visible to authenticated users.
+// No channel IDs, channel names, or channel scores are exposed.
+//
+// Request:
+//
+//	GET /api/relay/stats/models?start_timestamp=1773467002&end_timestamp=1773557002
+//
+// Query params:
+//   - start_timestamp: unix timestamp, filter window summaries ending after this time (optional)
+//   - end_timestamp: unix timestamp, filter window summaries starting before this time (optional)
+//
+// Response:
+//
+//	{
+//	  "success": true,
+//	  "data": [
+//	    {
+//	      "model_name": "gpt-4o",
+//	      "success_rate": 99.2,
+//	      "avg_duration_ms": 1200,
+//	      "avg_first_token_ms": 350,
+//	      "total_requests": 500,
+//	      "success_requests": 496,
+//	      "failed_requests": 4
+//	    }
+//	  ]
+//	}
+func GetUserModelStats(c *gin.Context) {
+	startTimestamp, _ := strconv.ParseInt(c.Query("start_timestamp"), 10, 64)
+	endTimestamp, _ := strconv.ParseInt(c.Query("end_timestamp"), 10, 64)
+
+	collector := service.GetRelayStatsCollector()
+	stats := collector.GetModelStats(startTimestamp, endTimestamp)
+	if stats == nil {
+		stats = []service.ModelStats{}
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data":    stats,
+	})
+}
+
 // parseDuration parses a human-friendly duration string like "5m", "1h", "24h", "7d".
 func parseDuration(s string, fallback time.Duration) time.Duration {
 	s = strings.TrimSpace(s)

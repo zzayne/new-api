@@ -197,6 +197,7 @@ func SetApiRouter(router *gin.Engine) {
 			performanceRoute.GET("/logs", controller.GetLogFiles)
 			performanceRoute.DELETE("/logs", controller.CleanupLogFiles)
 		}
+		apiRouter.GET("/relay/stats/models", middleware.UserAuth(), controller.GetUserModelStats)
 		relayStatsRoute := apiRouter.Group("/relay/stats")
 		relayStatsRoute.Use(middleware.RootAuth())
 		{

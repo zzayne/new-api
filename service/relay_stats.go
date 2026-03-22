@@ -24,6 +24,7 @@ type RelayStatsCollector interface {
 	GetWindowSummaries(limit int) []WindowSummary
 	GetTimeSeries(query TimeSeriesQuery) TimeSeriesResult
 	AggregateWindows(dimensions []string) map[string]StatsCounters
+	GetModelStats(startTime, endTime int64) []ModelStats
 	Reset()
 }
 
@@ -131,6 +132,20 @@ type StatsCounters struct {
 	TaskExecCount     int64   `json:"task_exec_count"`
 	TaskExecSuccess   int64   `json:"task_exec_success"`
 	AvgExecDurationMs float64 `json:"avg_exec_duration_ms,omitempty"`
+}
+
+// ---------------------------------------------------------------------------
+// ModelStats — user-facing, sanitized per-model statistics
+// ---------------------------------------------------------------------------
+
+type ModelStats struct {
+	ModelName       string  `json:"model_name"`
+	SuccessRate     float64 `json:"success_rate"`
+	AvgDurationMs   float64 `json:"avg_duration_ms"`
+	AvgFirstTokenMs float64 `json:"avg_first_token_ms"`
+	TotalRequests   int64   `json:"total_requests"`
+	SuccessRequests int64   `json:"success_requests"`
+	FailedRequests  int64   `json:"failed_requests"`
 }
 
 // ---------------------------------------------------------------------------
@@ -270,6 +285,7 @@ func (n *noopCollector) GetCounters() StatsCounters                            {
 func (n *noopCollector) GetWindowSummaries(_ int) []WindowSummary              { return nil }
 func (n *noopCollector) GetTimeSeries(_ TimeSeriesQuery) TimeSeriesResult      { return TimeSeriesResult{} }
 func (n *noopCollector) AggregateWindows(_ []string) map[string]StatsCounters  { return nil }
+func (n *noopCollector) GetModelStats(_, _ int64) []ModelStats                 { return nil }
 func (n *noopCollector) Reset()                                                {}
 
 type noopClassifier struct{}
