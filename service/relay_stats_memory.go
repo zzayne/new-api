@@ -5,6 +5,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/QuantumNous/new-api/common"
 )
 
 const defaultRingBufferSize = 10000
@@ -140,9 +142,10 @@ func (a *atomicCounters) reset() {
 // MemoryStatsCollector
 // ---------------------------------------------------------------------------
 
-// MemoryStatsCollector is an in-memory RelayStatsCollector.
+// MemoryStatsCollector is a RelayStatsCollector backed by in-memory RingBuffer
+// with optional DB persistence.
 // Raw events flow into a WindowBuffer; on flush, aggregated WindowSummary
-// records are pushed into a RingBuffer. Global atomic counters track lifetime totals.
+// records are pushed into a RingBuffer and persisted to DB.
 type MemoryStatsCollector struct {
 	windowBuf   *WindowBuffer
 	summaries   *RingBuffer[WindowSummary]
@@ -152,8 +155,7 @@ type MemoryStatsCollector struct {
 
 func NewMemoryStatsCollector(classifier ErrorClassifier, windowDuration time.Duration, bufSize int) *MemoryStatsCollector {
 	m := &MemoryStatsCollector{
-		summaries:   NewRingBuffer[WindowSummary](bufSize),
-		persistence: &noopPersistence{},
+		summaries: NewRingBuffer[WindowSummary](bufSize),
 	}
 	m.windowBuf = NewWindowBuffer(classifier, windowDuration, m.onWindowFlush)
 	return m
@@ -163,11 +165,31 @@ func (m *MemoryStatsCollector) SetPersistence(p StatsPersistence) {
 	m.persistence = p
 }
 
+// LoadFromDB restores window summaries from the database into the RingBuffer.
+func (m *MemoryStatsCollector) LoadFromDB(retentionHours int) {
+	if m.persistence == nil {
+		return
+	}
+	since := time.Now().Add(-time.Duration(retentionHours) * time.Hour)
+	summaries, err := m.persistence.LoadWindowSummaries(since, 0)
+	if err != nil {
+		common.SysError("stats: failed to load summaries from DB: " + err.Error())
+		return
+	}
+	if len(summaries) > 0 {
+		m.summaries.PushBatch(summaries)
+		common.SysLog("stats: loaded " + strconv.Itoa(len(summaries)) + " window summaries from DB")
+	}
+}
+
 // onWindowFlush is called by WindowBuffer after each time window.
 func (m *MemoryStatsCollector) onWindowFlush(summaries []WindowSummary) {
 	m.summaries.PushBatch(summaries)
-	// Persist user-visible counters on every flush
-	_ = m.persistence.SaveUserCounters(m.counters.snapshot())
+	if m.persistence != nil {
+		if err := m.persistence.SaveWindowSummaries(summaries); err != nil {
+			common.SysError("stats: failed to persist window summaries: " + err.Error())
+		}
+	}
 }
 
 func (m *MemoryStatsCollector) CollectAttempt(event AttemptEvent) {
@@ -221,7 +243,9 @@ func (m *MemoryStatsCollector) GetCounters() StatsCounters {
 }
 
 func (m *MemoryStatsCollector) GetWindowSummaries(limit int) []WindowSummary {
-	return m.summaries.Snapshot(limit)
+	result := m.summaries.Snapshot(limit)
+	result = append(result, m.windowBuf.Peek()...)
+	return result
 }
 
 func (m *MemoryStatsCollector) AggregateWindows(dimensions []string) map[string]StatsCounters {
@@ -230,6 +254,7 @@ func (m *MemoryStatsCollector) AggregateWindows(dimensions []string) map[string]
 		return nil
 	}
 	windows := m.summaries.Snapshot(0)
+	windows = append(windows, m.windowBuf.Peek()...)
 	buckets := make(map[string]*windowAgg)
 	for _, w := range windows {
 		key := keyFunc(w)
@@ -253,6 +278,7 @@ func (m *MemoryStatsCollector) AggregateWindows(dimensions []string) map[string]
 // GetTimeSeries builds time series data for chart rendering.
 func (m *MemoryStatsCollector) GetTimeSeries(query TimeSeriesQuery) TimeSeriesResult {
 	windows := m.summaries.Snapshot(0)
+	windows = append(windows, m.windowBuf.Peek()...)
 
 	cutoff := time.Now().Add(-query.Range)
 	var filtered []WindowSummary

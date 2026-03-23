@@ -189,10 +189,17 @@ func (wb *WindowBuffer) CollectAttempt(event *AttemptEvent) {
 func (wb *WindowBuffer) CollectRequestComplete(event *RequestCompleteEvent) {
 	event.Timestamp = time.Now()
 
+	// Use the last channel in the chain as the channel_id for this request outcome.
+	// This merges request-level data into the same bucket as attempt-level data.
+	channelID := 0
+	if len(event.ChannelChain) > 0 {
+		channelID = event.ChannelChain[len(event.ChannelChain)-1]
+	}
+
 	wb.mu.Lock()
 	defer wb.mu.Unlock()
 
-	key := windowBucketKey{ModelName: event.OriginalModel, Group: event.Group}
+	key := windowBucketKey{ModelName: event.OriginalModel, ChannelID: channelID, Group: event.Group}
 	b := wb.getBucket(key)
 
 	b.totalRequests++

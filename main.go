@@ -112,8 +112,9 @@ func main() {
 	// Subscription quota reset task (daily/weekly/monthly/custom)
 	service.StartSubscriptionQuotaResetTask()
 
-	// Initialize relay stats collector with in-memory implementation
+	// Initialize relay stats collector and wire DB persistence
 	service.InitRelayStats()
+	service.SetupStatsPersistence(model.DB)
 
 	// Wire task polling adaptor factory (breaks service -> relay import cycle)
 	service.GetTaskAdaptorFunc = func(platform constant.TaskPlatform) service.TaskPollingAdaptor {
@@ -200,7 +201,6 @@ func main() {
 	if port == "" {
 		port = strconv.Itoa(*common.Port)
 	}
-
 	// Log startup success message
 	common.LogStartupSuccess(startTime, port)
 

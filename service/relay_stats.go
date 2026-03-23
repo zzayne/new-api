@@ -8,6 +8,7 @@ import (
 
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
+	"gorm.io/gorm"
 )
 
 // ---------------------------------------------------------------------------
@@ -258,6 +259,12 @@ func SafeCollectTaskExecution(collector RelayStatsCollector, event TaskExecution
 // Initialization
 // ---------------------------------------------------------------------------
 
+// statsRetentionHours controls how far back summaries are loaded on startup.
+const statsRetentionHours = 24 * 7 // 7 days
+
+// statsCleanupRetentionDays controls how old summaries must be before deletion.
+const statsCleanupRetentionDays = 7
+
 func InitRelayStats() {
 	classifier := NewRuleBasedClassifier(nil)
 	SetErrorClassifier(classifier)
@@ -270,6 +277,18 @@ func InitRelayStats() {
 	if json := operation_setting.StatsErrorExclusionRulesJSON; json != "" && json != "[]" {
 		_ = StatsErrorExclusionRulesFromJSON(json)
 	}
+}
+
+// SetupStatsPersistence wires up DB persistence. Called after DB is ready.
+func SetupStatsPersistence(db *gorm.DB) {
+	collector, ok := GetRelayStatsCollector().(*MemoryStatsCollector)
+	if !ok {
+		return
+	}
+	p := NewDBPersistence(db)
+	collector.SetPersistence(p)
+	collector.LoadFromDB(statsRetentionHours)
+	StartStatsCleanup(p, statsCleanupRetentionDays, 1*time.Hour)
 }
 
 // ---------------------------------------------------------------------------

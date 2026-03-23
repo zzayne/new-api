@@ -551,6 +551,7 @@ func RelayMidjourney(c *gin.Context) {
 			TotalAttempts: 1,
 			FinalSuccess:  success,
 			TotalDuration: mjDuration,
+			ChannelChain:  []int{channelId},
 		})
 	}
 
