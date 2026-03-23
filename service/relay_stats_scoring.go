@@ -65,7 +65,9 @@ func ComputeChannelScore(s WindowSummary) float64 {
 
 func computeSpeedScore(avgMs float64) float64 {
 	if avgMs <= 0 {
-		return scoreSpeedWeight
+		// No timing data available — return half score to avoid inflating scores
+		// for channels with insufficient data.
+		return scoreSpeedWeight * 0.5
 	}
 	switch {
 	case avgMs <= speedExcellentMs:
