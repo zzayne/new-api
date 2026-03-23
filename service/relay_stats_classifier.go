@@ -53,10 +53,11 @@ func (c *RuleBasedClassifier) Classify(event AttemptEvent) (bool, int, string) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	// Try model-specific rules first
+	// Try model-specific rules first; only short-circuit if a rule actually matched
+	// (reason != "" indicates a real match, not the default no-match return).
 	if event.ModelName != "" {
 		if group, ok := c.modelGroups[event.ModelName]; ok {
-			if excluded, level, reason := c.matchGroup(group, event.ChannelType, event.StatusCode, event.ErrorCode, event.ErrorMessage); excluded || level > 0 {
+			if excluded, level, reason := c.matchGroup(group, event.ChannelType, event.StatusCode, event.ErrorCode, event.ErrorMessage); reason != "" {
 				return excluded, level, reason
 			}
 		}
@@ -76,10 +77,10 @@ func (c *RuleBasedClassifier) ClassifyTaskFailReason(modelName string, failReaso
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	// Try model-specific rules (keyword match on failReason)
+	// Try model-specific rules (keyword match on failReason); only short-circuit on real match
 	if modelName != "" {
 		if group, ok := c.modelGroups[modelName]; ok {
-			if excluded, level, reason := c.matchGroupByMessage(group, failReason); excluded || level > 0 {
+			if excluded, level, reason := c.matchGroupByMessage(group, failReason); reason != "" {
 				return excluded, level, reason
 			}
 		}

@@ -540,8 +540,9 @@ type windowAgg struct {
 	retryRequests   int64
 	retryRecovered  int64
 
-	taskExecCount   int64
-	taskExecSuccess int64
+	taskExecCount      int64
+	taskExecSuccess    int64
+	taskExecDurationNs int64
 
 	channelScoreSum float64
 }
@@ -565,6 +566,7 @@ func (a *windowAgg) addWindow(w WindowSummary) {
 
 	a.taskExecCount += w.TaskExecCount
 	a.taskExecSuccess += w.TaskExecSuccess
+	a.taskExecDurationNs += w.TaskExecDurationNs
 
 	a.channelScoreSum += w.ChannelScore
 }
@@ -586,7 +588,7 @@ func (a *windowAgg) toCounters() StatsCounters {
 		tps = float64(a.totalAttempts) / a.windowSeconds
 	}
 	if a.taskExecCount > 0 {
-		avgExec = float64(a.totalDurationNs) / float64(a.taskExecCount) / 1e6
+		avgExec = float64(a.taskExecDurationNs) / float64(a.taskExecCount) / 1e6
 	}
 	return StatsCounters{
 		TotalRequests:     a.totalRequests,

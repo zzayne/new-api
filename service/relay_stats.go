@@ -186,28 +186,35 @@ type TimeSeriesResult struct {
 
 type WindowDimensionExtractor func(s WindowSummary) string
 
-var windowDimensionExtractors = map[string]WindowDimensionExtractor{
-	"model": func(s WindowSummary) string { return s.ModelName },
-	"channel": func(s WindowSummary) string {
-		if s.ChannelID == 0 {
-			return ""
-		}
-		return strconv.Itoa(s.ChannelID)
-	},
-	"group": func(s WindowSummary) string { return s.Group },
-}
+var (
+	dimExtractorMu             sync.RWMutex
+	windowDimensionExtractors = map[string]WindowDimensionExtractor{
+		"model": func(s WindowSummary) string { return s.ModelName },
+		"channel": func(s WindowSummary) string {
+			if s.ChannelID == 0 {
+				return ""
+			}
+			return strconv.Itoa(s.ChannelID)
+		},
+		"group": func(s WindowSummary) string { return s.Group },
+	}
+)
 
 func RegisterWindowDimension(name string, extractor WindowDimensionExtractor) {
+	dimExtractorMu.Lock()
 	windowDimensionExtractors[name] = extractor
+	dimExtractorMu.Unlock()
 }
 
 func buildWindowKeyFunc(dimensions []string) func(WindowSummary) string {
+	dimExtractorMu.RLock()
 	extractors := make([]WindowDimensionExtractor, 0, len(dimensions))
 	for _, d := range dimensions {
 		if ext, ok := windowDimensionExtractors[d]; ok {
 			extractors = append(extractors, ext)
 		}
 	}
+	dimExtractorMu.RUnlock()
 	if len(extractors) == 0 {
 		return nil
 	}

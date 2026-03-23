@@ -119,7 +119,9 @@ func (wb *WindowBuffer) Reset() {
 func (wb *WindowBuffer) flushLoop() {
 	for {
 		now := time.Now()
+		wb.mu.Lock()
 		nextFlush := wb.windowStart.Add(wb.windowDuration)
+		wb.mu.Unlock()
 		sleepDuration := nextFlush.Sub(now)
 		if sleepDuration <= 0 {
 			sleepDuration = time.Millisecond
@@ -314,8 +316,8 @@ func (wb *WindowBuffer) Peek() []WindowSummary {
 	}
 	snapshot := make(map[windowBucketKey]*windowBucket, len(wb.buckets))
 	for k, b := range wb.buckets {
-		copy := *b
-		snapshot[k] = &copy
+		dup := *b
+		snapshot[k] = &dup
 	}
 	windowStart := wb.windowStart
 	wb.mu.Unlock()
