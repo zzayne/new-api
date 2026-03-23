@@ -48,11 +48,6 @@ type WindowSummary struct {
 	ChannelScore float64 `json:"channel_score"`
 }
 
-// dimKey produces a string key combining the three dimension fields.
-func (s *WindowSummary) dimKey() string {
-	return s.ModelName + "|" + string(rune(s.ChannelID)) + "|" + s.Group
-}
-
 // windowBucketKey is a composite key used to index mutable buckets during collection.
 type windowBucketKey struct {
 	ModelName string
@@ -112,6 +107,13 @@ func NewWindowBuffer(classifier ErrorClassifier, windowDuration time.Duration, o
 
 func (wb *WindowBuffer) Stop() {
 	close(wb.stopCh)
+}
+
+func (wb *WindowBuffer) Reset() {
+	wb.mu.Lock()
+	wb.buckets = make(map[windowBucketKey]*windowBucket)
+	wb.windowStart = time.Now().Truncate(wb.windowDuration)
+	wb.mu.Unlock()
 }
 
 func (wb *WindowBuffer) flushLoop() {
@@ -306,8 +308,9 @@ func (wb *WindowBuffer) Peek() []WindowSummary {
 	wb.mu.Lock()
 	now := time.Now()
 	elapsed := now.Sub(wb.windowStart).Seconds()
-	if elapsed <= 0 {
-		elapsed = 1
+	// Use at least 30s to prevent wildly inflated TPS when the window just started
+	if elapsed < 30 {
+		elapsed = 30
 	}
 	snapshot := make(map[windowBucketKey]*windowBucket, len(wb.buckets))
 	for k, b := range wb.buckets {

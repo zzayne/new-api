@@ -17,8 +17,10 @@ import (
 
 // RelayStatsCollector collects relay request events and provides query access.
 // Implementations must be safe for concurrent use.
+// CollectAttempt takes a pointer so classification results (Excluded, ErrorLevel)
+// propagate back to the caller.
 type RelayStatsCollector interface {
-	CollectAttempt(event AttemptEvent)
+	CollectAttempt(event *AttemptEvent)
 	CollectRequestComplete(event RequestCompleteEvent)
 	CollectTaskExecution(event TaskExecutionEvent)
 	GetCounters() StatsCounters
@@ -243,7 +245,7 @@ func GetErrorClassifier() ErrorClassifier             { classifierMu.RLock(); de
 
 func safeCollect(fn func()) { defer func() { recover() }(); fn() }
 
-func SafeCollectAttempt(collector RelayStatsCollector, event AttemptEvent) {
+func SafeCollectAttempt(collector RelayStatsCollector, event *AttemptEvent) {
 	safeCollect(func() { collector.CollectAttempt(event) })
 }
 
@@ -288,7 +290,7 @@ func SetupStatsPersistence(db *gorm.DB) {
 	p := NewDBPersistence(db)
 	collector.SetPersistence(p)
 	collector.LoadFromDB(statsRetentionHours)
-	StartStatsCleanup(p, statsCleanupRetentionDays, 1*time.Hour)
+	_ = StartStatsCleanup(p, statsCleanupRetentionDays, 1*time.Hour)
 }
 
 // ---------------------------------------------------------------------------
@@ -297,7 +299,7 @@ func SetupStatsPersistence(db *gorm.DB) {
 
 type noopCollector struct{}
 
-func (n *noopCollector) CollectAttempt(_ AttemptEvent)                          {}
+func (n *noopCollector) CollectAttempt(_ *AttemptEvent)                         {}
 func (n *noopCollector) CollectRequestComplete(_ RequestCompleteEvent)          {}
 func (n *noopCollector) CollectTaskExecution(_ TaskExecutionEvent)              {}
 func (n *noopCollector) GetCounters() StatsCounters                            { return StatsCounters{} }

@@ -192,8 +192,8 @@ func (m *MemoryStatsCollector) onWindowFlush(summaries []WindowSummary) {
 	}
 }
 
-func (m *MemoryStatsCollector) CollectAttempt(event AttemptEvent) {
-	m.windowBuf.CollectAttempt(&event)
+func (m *MemoryStatsCollector) CollectAttempt(event *AttemptEvent) {
+	m.windowBuf.CollectAttempt(event)
 
 	m.counters.totalAttempts.Add(1)
 	if event.Success {
@@ -413,6 +413,7 @@ func (m *MemoryStatsCollector) GetModelStats(startTime, endTime int64) []ModelSt
 func (m *MemoryStatsCollector) Reset() {
 	m.counters.reset()
 	m.summaries.Reset()
+	m.windowBuf.Reset()
 }
 
 // ---------------------------------------------------------------------------

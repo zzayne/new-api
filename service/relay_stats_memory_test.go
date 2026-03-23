@@ -126,7 +126,7 @@ func TestCollector_SuccessAttempt(t *testing.T) {
 	t.Parallel()
 	c := newTestCollector(nil)
 
-	c.CollectAttempt(AttemptEvent{
+	c.CollectAttempt(&AttemptEvent{
 		RequestID: "r1",
 		ChannelID: 1,
 		Success:   true,
@@ -143,7 +143,7 @@ func TestCollector_FailedAttempt_NoClassifier(t *testing.T) {
 	t.Parallel()
 	c := newTestCollector(nil)
 
-	c.CollectAttempt(AttemptEvent{
+	c.CollectAttempt(&AttemptEvent{
 		RequestID:  "r1",
 		ChannelID:  1,
 		Success:    false,
@@ -165,7 +165,7 @@ func TestCollector_FailedAttempt_Excluded(t *testing.T) {
 	})
 	c := newTestCollector(classifier)
 
-	c.CollectAttempt(AttemptEvent{
+	c.CollectAttempt(&AttemptEvent{
 		RequestID:  "r1",
 		ChannelID:  1,
 		Success:    false,
@@ -260,8 +260,8 @@ func TestCollector_Reset(t *testing.T) {
 	t.Parallel()
 	c := newTestCollector(nil)
 
-	c.CollectAttempt(AttemptEvent{Success: true})
-	c.CollectAttempt(AttemptEvent{Success: false, StatusCode: 500})
+	c.CollectAttempt(&AttemptEvent{Success: true})
+	c.CollectAttempt(&AttemptEvent{Success: false, StatusCode: 500})
 	c.CollectRequestComplete(RequestCompleteEvent{FinalSuccess: true})
 
 	c.Reset()
@@ -280,10 +280,10 @@ func TestCollector_MixedScenario(t *testing.T) {
 	})
 	c := newTestCollector(classifier)
 
-	c.CollectAttempt(AttemptEvent{Success: false, StatusCode: 400})
-	c.CollectAttempt(AttemptEvent{Success: false, StatusCode: 500})
-	c.CollectAttempt(AttemptEvent{Success: false, ErrorCode: "rate_limited"})
-	c.CollectAttempt(AttemptEvent{Success: true})
+	c.CollectAttempt(&AttemptEvent{Success: false, StatusCode: 400})
+	c.CollectAttempt(&AttemptEvent{Success: false, StatusCode: 500})
+	c.CollectAttempt(&AttemptEvent{Success: false, ErrorCode: "rate_limited"})
+	c.CollectAttempt(&AttemptEvent{Success: true})
 
 	counters := c.GetCounters()
 	assert.Equal(t, int64(4), counters.TotalAttempts)
@@ -300,11 +300,11 @@ func TestAggregateWindows_ByModel(t *testing.T) {
 	t.Parallel()
 	c := newTestCollector(nil)
 
-	c.CollectAttempt(AttemptEvent{ModelName: "gpt-4", Success: true, Duration: 100 * time.Millisecond})
-	c.CollectAttempt(AttemptEvent{ModelName: "gpt-4", Success: true, Duration: 200 * time.Millisecond})
-	c.CollectAttempt(AttemptEvent{ModelName: "gpt-4", Success: false, StatusCode: 500, Duration: 50 * time.Millisecond})
-	c.CollectAttempt(AttemptEvent{ModelName: "claude-3", Success: true, Duration: 150 * time.Millisecond})
-	c.CollectAttempt(AttemptEvent{ModelName: "claude-3", Success: false, StatusCode: 429, Duration: 30 * time.Millisecond})
+	c.CollectAttempt(&AttemptEvent{ModelName: "gpt-4", Success: true, Duration: 100 * time.Millisecond})
+	c.CollectAttempt(&AttemptEvent{ModelName: "gpt-4", Success: true, Duration: 200 * time.Millisecond})
+	c.CollectAttempt(&AttemptEvent{ModelName: "gpt-4", Success: false, StatusCode: 500, Duration: 50 * time.Millisecond})
+	c.CollectAttempt(&AttemptEvent{ModelName: "claude-3", Success: true, Duration: 150 * time.Millisecond})
+	c.CollectAttempt(&AttemptEvent{ModelName: "claude-3", Success: false, StatusCode: 429, Duration: 30 * time.Millisecond})
 
 	flushWindows(c)
 
@@ -326,9 +326,9 @@ func TestAggregateWindows_ByChannel(t *testing.T) {
 	t.Parallel()
 	c := newTestCollector(nil)
 
-	c.CollectAttempt(AttemptEvent{ModelName: "m1", ChannelID: 10, Success: true})
-	c.CollectAttempt(AttemptEvent{ModelName: "m1", ChannelID: 10, Success: false, StatusCode: 500})
-	c.CollectAttempt(AttemptEvent{ModelName: "m1", ChannelID: 20, Success: true})
+	c.CollectAttempt(&AttemptEvent{ModelName: "m1", ChannelID: 10, Success: true})
+	c.CollectAttempt(&AttemptEvent{ModelName: "m1", ChannelID: 10, Success: false, StatusCode: 500})
+	c.CollectAttempt(&AttemptEvent{ModelName: "m1", ChannelID: 20, Success: true})
 
 	flushWindows(c)
 
@@ -345,9 +345,9 @@ func TestAggregateWindows_WithExclusion(t *testing.T) {
 	})
 	c := newTestCollector(classifier)
 
-	c.CollectAttempt(AttemptEvent{ModelName: "gpt-4", Success: false, StatusCode: 400})
-	c.CollectAttempt(AttemptEvent{ModelName: "gpt-4", Success: false, StatusCode: 500})
-	c.CollectAttempt(AttemptEvent{ModelName: "gpt-4", Success: true})
+	c.CollectAttempt(&AttemptEvent{ModelName: "gpt-4", Success: false, StatusCode: 400})
+	c.CollectAttempt(&AttemptEvent{ModelName: "gpt-4", Success: false, StatusCode: 500})
+	c.CollectAttempt(&AttemptEvent{ModelName: "gpt-4", Success: true})
 
 	flushWindows(c)
 
@@ -362,7 +362,7 @@ func TestAggregateWindows_WithExclusion(t *testing.T) {
 func TestAggregateWindows_InvalidDimension(t *testing.T) {
 	t.Parallel()
 	c := newTestCollector(nil)
-	c.CollectAttempt(AttemptEvent{Success: true})
+	c.CollectAttempt(&AttemptEvent{Success: true})
 	flushWindows(c)
 
 	result := c.AggregateWindows([]string{"nonexistent"})
@@ -428,9 +428,9 @@ func TestCollector_AsyncSubmitTracking(t *testing.T) {
 	t.Parallel()
 	c := newTestCollector(nil)
 
-	c.CollectAttempt(AttemptEvent{IsAsync: true, Success: true})
-	c.CollectAttempt(AttemptEvent{IsAsync: true, Success: false, StatusCode: 500})
-	c.CollectAttempt(AttemptEvent{IsAsync: false, Success: true})
+	c.CollectAttempt(&AttemptEvent{IsAsync: true, Success: true})
+	c.CollectAttempt(&AttemptEvent{IsAsync: true, Success: false, StatusCode: 500})
+	c.CollectAttempt(&AttemptEvent{IsAsync: false, Success: true})
 
 	counters := c.GetCounters()
 	assert.Equal(t, int64(2), counters.TaskSubmitCount)
@@ -501,9 +501,9 @@ func TestGetTimeSeries_Basic(t *testing.T) {
 	t.Parallel()
 	c := newTestCollector(nil)
 
-	c.CollectAttempt(AttemptEvent{ModelName: "gpt-4", ChannelID: 1, Success: true})
-	c.CollectAttempt(AttemptEvent{ModelName: "gpt-4", ChannelID: 1, Success: false, StatusCode: 500})
-	c.CollectAttempt(AttemptEvent{ModelName: "claude-3", ChannelID: 2, Success: true})
+	c.CollectAttempt(&AttemptEvent{ModelName: "gpt-4", ChannelID: 1, Success: true})
+	c.CollectAttempt(&AttemptEvent{ModelName: "gpt-4", ChannelID: 1, Success: false, StatusCode: 500})
+	c.CollectAttempt(&AttemptEvent{ModelName: "claude-3", ChannelID: 2, Success: true})
 
 	flushWindows(c)
 

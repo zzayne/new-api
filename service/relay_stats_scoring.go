@@ -3,11 +3,15 @@ package service
 import "math"
 
 // Scoring weights (can be extracted to setting later)
+//
+// A perfectly healthy channel (100% success, fast responses) should score ~95.
+// Recovery bonus rewards resilience, pushing up to 100 for channels that
+// recover well from transient errors.
 const (
-	scoreBaseWeight     = 60.0 // max points from success rate
-	scoreSeverityMax    = 30.0 // max deduction from error severity
-	scoreRecoveryWeight = 10.0 // max points from retry recovery
-	scoreSpeedWeight    = 10.0 // max points from response speed
+	scoreBaseWeight     = 75.0 // max points from success rate
+	scoreSeverityMax    = 25.0 // max deduction from error severity
+	scoreRecoveryWeight = 5.0  // max points from retry recovery (bonus for resilience)
+	scoreSpeedWeight    = 20.0 // max points from response speed
 
 	// Response time thresholds (ms) for speed scoring
 	speedExcellentMs = 500

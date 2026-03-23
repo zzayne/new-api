@@ -159,7 +159,7 @@ func main() {
 	server := gin.New()
 	server.Use(gin.CustomRecovery(func(c *gin.Context, err any) {
 		common.SysLog(fmt.Sprintf("panic detected: %v", err))
-		service.SafeCollectAttempt(service.GetRelayStatsCollector(), service.AttemptEvent{
+		service.SafeCollectAttempt(service.GetRelayStatsCollector(), &service.AttemptEvent{
 			RequestID:    c.GetString(common.RequestIdKey),
 			ModelName:    c.GetString("model"),
 			ChannelID:    c.GetInt("channel_id"),

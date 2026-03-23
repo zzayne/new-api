@@ -188,24 +188,33 @@ func fromRow(r statsWindowSummaryRow) WindowSummary {
 // Cleanup goroutine
 // ---------------------------------------------------------------------------
 
-func StartStatsCleanup(p StatsPersistence, retentionDays int, interval time.Duration) {
+// StartStatsCleanup periodically deletes old window summary rows.
+// Returns a stop function that can be called to halt the cleanup goroutine.
+func StartStatsCleanup(p StatsPersistence, retentionDays int, interval time.Duration) (stop func()) {
 	if retentionDays <= 0 {
 		retentionDays = 7
 	}
 	if interval <= 0 {
 		interval = 1 * time.Hour
 	}
+	stopCh := make(chan struct{})
 	go func() {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
-		for range ticker.C {
-			cutoff := time.Now().AddDate(0, 0, -retentionDays)
-			deleted, err := p.DeleteBefore(cutoff)
-			if err != nil {
-				common.SysError("stats cleanup error: " + err.Error())
-			} else if deleted > 0 {
-				common.SysLog(fmt.Sprintf("stats cleanup: deleted %d rows before %s", deleted, cutoff.Format("2006-01-02")))
+		for {
+			select {
+			case <-ticker.C:
+				cutoff := time.Now().AddDate(0, 0, -retentionDays)
+				deleted, err := p.DeleteBefore(cutoff)
+				if err != nil {
+					common.SysError("stats cleanup error: " + err.Error())
+				} else if deleted > 0 {
+					common.SysLog(fmt.Sprintf("stats cleanup: deleted %d rows before %s", deleted, cutoff.Format("2006-01-02")))
+				}
+			case <-stopCh:
+				return
 			}
 		}
 	}()
+	return func() { close(stopCh) }
 }
