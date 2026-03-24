@@ -171,7 +171,7 @@ Task 类型请求（Midjourney 等异步任务）有独立的重试逻辑 `shoul
 | `ErrorLogEnabled` | 是否记录错误日志到数据库 | - |
 | `AutomaticDisableKeywords` | 自动禁用渠道的关键词列表 | - |
 | `AutomaticRetryStatusCodeRanges` | 可重试的 HTTP 状态码范围 | 见上文 |
-| `StatsErrorExclusionRules` | 统计采集中排除特定错误的规则（JSON） | `[]` |
+| `StatsErrorExclusionRules` | 统计采集中排除特定错误的规则（JSON） | 内置 5 条默认规则 |
 
 ---
 
@@ -179,40 +179,56 @@ Task 类型请求（Midjourney 等异步任务）有独立的重试逻辑 `shoul
 
 ### 概述
 
-在 relay 请求的重试循环中嵌入统计采集层，记录每次尝试（attempt）和整体请求（request）的成功/失败结果。关键统计维度：
+在 relay 请求的重试循环中嵌入统计采集层，通过时间窗口聚合记录每次尝试（attempt）、整体请求（request）和异步任务执行（task execution）的统计数据。核心指标：
 
-- 总请求数 / 成功 / 失败
-- 总尝试数 / 成功 / 失败 / 被排除
+- 总请求数 / 成功 / 失败、总尝试数 / 成功 / 失败 / 被排除
 - 重试请求数 / 重试后恢复数 / 恢复率
+- TPS、平均响应时间、首字响应时间
+- 异步任务提交成功率 / 执行成功率
+- 渠道健康评分（0-100）
 
 ### 架构
 
 ```
-接口层                    实现层                    配置层
-┌──────────────────┐    ┌──────────────────────┐  ┌──────────────────────┐
-│ RelayStatsCollector│◄───│ MemoryStatsCollector │  │ operation_setting/   │
-│   CollectAttempt  │    │  RingBuffer + Atomic │  │  stats_setting.go    │
-│   CollectComplete │    └──────────────────────┘  │  (JSON rules in DB)  │
-└──────────────────┘                               └──────────┬───────────┘
-                                                              │ callback
-┌──────────────────┐    ┌──────────────────────┐              │
-│ ErrorClassifier   │◄───│ RuleBasedClassifier  │◄─────────────┘
-│   Classify        │    │  AcSearch + lookup   │
-└──────────────────┘    └──────────────────────┘
+接口层                       实现层                         配置层
+┌───────────────────────┐   ┌────────────────────────────┐  ┌─────────────────────┐
+│ RelayStatsCollector    │◄──│ MemoryStatsCollector       │  │ operation_setting/  │
+│  CollectAttempt(*ptr)  │   │  WindowBuffer → RingBuffer │  │  stats_setting.go   │
+│  CollectRequestComplete│   │  atomicCounters + DB persist│  │  (JSON rules in DB) │
+│  CollectTaskExecution  │   └────────────────────────────┘  └──────────┬──────────┘
+│  GetWindowSummaries    │                                              │ callback
+│  GetTimeSeries         │   ┌────────────────────────────┐            │
+│  AggregateWindows      │   │ RuleBasedClassifier        │◄───────────┘
+│  GetModelStats         │   │  per-model + default groups │
+└───────────────────────┘   │  AcSearch + lookup sets     │
+                             └────────────────────────────┘
+┌───────────────────────┐
+│ ErrorClassifier        │
+│  Classify() → (excl,  │
+│    level, reason)      │
+│  ClassifyTaskFailReason│
+└───────────────────────┘
 ```
+
+数据流：原始事件 → WindowBuffer（5 分钟窗口内存聚合）→ WindowSummary → RingBuffer + DB 持久化
 
 ### 文件结构
 
 | 文件 | 内容 |
 |------|------|
-| `service/relay_stats.go` | 接口定义（`RelayStatsCollector`, `ErrorClassifier`）、事件结构体、全局注册、Noop 实现、`safeCollect`、`InitRelayStats` |
-| `service/relay_stats_classifier.go` | `ErrorExclusionRule` 结构体、`RuleBasedClassifier` 实现、JSON 解析 |
-| `service/relay_stats_memory.go` | `MemoryStatsCollector`、`RingBuffer[T]`（泛型环形缓冲）、`atomicCounters` |
-| `controller/relay_stats.go` | 查询 API handler |
-| `controller/relay.go` | 埋点代码（`Relay()` 和 `RelayTask()` 重试循环中） |
+| `service/relay_stats.go` | 接口定义、事件结构体、维度提取器、全局注册、Noop 实现、`safeCollect`、`InitRelayStats`/`SetupStatsPersistence` |
+| `service/relay_stats_classifier.go` | `ErrorExclusionRule`、`RuleBasedClassifier`（按 model 分组 + default 兜底）、JSON 解析 |
+| `service/relay_stats_window.go` | `WindowBuffer`（时间窗口缓冲 + flush 循环）、`WindowSummary`、`buildSummaries` |
+| `service/relay_stats_memory.go` | `MemoryStatsCollector`、`RingBuffer[T]`（泛型环形缓冲）、`atomicCounters`、时间序列构建、`windowAgg` |
+| `service/relay_stats_scoring.go` | `ComputeChannelScore`（渠道健康评分公式） |
+| `service/relay_stats_tracker.go` | `relayStatsTracker`（消除 Relay/RelayTask/RelayMidjourney 的重复埋点代码） |
+| `service/relay_stats_persistence.go` | `StatsPersistence` 接口、GORM `dbPersistence` 实现、`stats_window_summaries` 表、定时清理 |
+| `controller/relay_stats.go` | 查询 API handler（含 `parseDuration` 工具函数） |
+| `controller/relay.go` | 埋点代码（`Relay()`、`RelayTask()`、`RelayMidjourney()` 中使用 `relayStatsTracker`） |
+| `service/task_polling.go` | 异步任务执行完成时采集 `TaskExecutionEvent` |
 | `router/api-router.go` | 路由注册 `/api/relay/stats/*` |
-| `setting/operation_setting/stats_setting.go` | `StatsErrorExclusionRules` 配置项管理 |
-| `main.go` | 调用 `service.InitRelayStats()` 初始化 |
+| `setting/operation_setting/stats_setting.go` | `StatsErrorExclusionRules` 配置项 + 内置默认规则 |
+| `main.go` | 调用 `InitRelayStats()` + `SetupStatsPersistence()` + panic 采集 |
 
 ### 接口设计
 
@@ -220,27 +236,30 @@ Task 类型请求（Midjourney 等异步任务）有独立的重试逻辑 `shoul
 
 ```go
 type RelayStatsCollector interface {
-    CollectAttempt(event AttemptEvent)
+    CollectAttempt(event *AttemptEvent)              // 指针传入，分类结果回写
     CollectRequestComplete(event RequestCompleteEvent)
-    GetCounters() StatsCounters
-    GetRecentAttempts(limit int) []AttemptEvent
-    GetRecentRequests(limit int) []RequestCompleteEvent
+    CollectTaskExecution(event TaskExecutionEvent)
+    GetCounters() StatsCounters                      // 全局原子计数器快照
+    GetWindowSummaries(limit int) []WindowSummary    // 历史窗口 + 当前窗口 Peek
+    GetTimeSeries(query TimeSeriesQuery) TimeSeriesResult
+    AggregateWindows(dimensions []string) map[string]StatsCounters
+    GetModelStats(startTime, endTime int64) []ModelStats  // 用户可见
     Reset()
 }
 ```
 
-当前实现：`MemoryStatsCollector`（内存环形缓冲 + 原子计数器）
-后续可替换为 Redis / DB / Prometheus 等持久化方案，只需实现此接口。
+当前实现：`MemoryStatsCollector`（WindowBuffer → RingBuffer + 原子计数器 + DB 持久化）
 
 #### ErrorClassifier
 
 ```go
 type ErrorClassifier interface {
-    Classify(event AttemptEvent) (excluded bool, reason string)
+    Classify(event AttemptEvent) (excluded bool, level int, reason string)
+    ClassifyTaskFailReason(modelName string, failReason string) (excluded bool, level int, reason string)
 }
 ```
 
-当前实现：`RuleBasedClassifier`（基于可配置的排除规则）
+当前实现：`RuleBasedClassifier`（按 model 分组的规则匹配，精确模型 > default 兜底）
 
 ### 事件结构体
 
@@ -249,201 +268,176 @@ type ErrorClassifier interface {
 - `RequestID`, `AttemptIndex` — 请求标识和重试索引
 - `ChannelID`, `ChannelType`, `ChannelName` — 渠道信息
 - `ModelName`, `Group` — 模型和分组
+- `IsAsync` — 是否为异步任务提交
 - `Success` — 是否成功
 - `StatusCode`, `ErrorCode`, `ErrorType`, `ErrorMessage` — 错误详情
-- `Duration` — 本次尝试耗时
-- `Excluded`, `ExcludeReason` — 是否被排除规则排除
+- `ErrorLevel` — 错误严重级别（0=excluded, 1=normal, 2=serious, 3=critical）
+- `Duration`, `FirstTokenDuration` — 本次尝试耗时 / 首字响应时间
+- `Excluded`, `ExcludeReason` — 是否被排除规则排除（由分类器在 WindowBuffer 内设置）
 
 #### RequestCompleteEvent（整体请求）
 
 - `RequestID`, `UserID`, `TokenID`, `Group`, `OriginalModel`, `RelayMode` — 请求上下文
+- `IsAsync` — 是否为异步任务
 - `TotalAttempts` — 总尝试次数
 - `FinalSuccess` — 最终是否成功
 - `HasRetry` — 是否发生过重试（`TotalAttempts > 1`）
 - `RetryRecovered` — 关键指标：曾失败但最终成功
-- `ChannelChain` — 尝试过的渠道 ID 链
+- `ChannelChain` — 尝试过的渠道 ID 链（最后一个用于窗口 bucket key）
 - `TotalDuration` — 总耗时
 - `FirstErrorCode`, `FirstErrorStatusCode` — 首次错误信息
 - `ExcludedAttempts`, `RealErrorAttempts` — 被排除 / 真实错误次数
+
+#### TaskExecutionEvent（异步任务执行完成）
+
+- `TaskID`, `Platform`, `ModelName`, `ChannelID`, `Group` — 任务上下文
+- `Success`, `FailReason` — 执行结果（`fail_reason` 经分类器判断是否排除）
+- `SubmitTime`, `FinishTime`, `ExecutionDuration` — 时间信息
 
 ### 错误排除规则
 
 #### 规则结构
 
 ```json
-[
-  {
-    "description": "Client parameter errors",
-    "error_codes": ["invalid_request_error", "invalid_parameter"],
-    "status_codes": [400]
-  },
-  {
-    "channel_types": [1, 6],
-    "message_keywords": ["context_length_exceeded", "maximum context length"],
-    "description": "OpenAI context length exceeded"
-  },
-  {
-    "status_codes": [429],
-    "description": "Rate limiting is transient"
-  },
-  {
-    "channel_types": [24],
-    "error_codes": ["prompt_blocked"],
-    "message_keywords": ["safety", "blocked"],
-    "description": "Gemini safety block"
-  }
-]
+{
+  "model": "gpt-4",           // 可选，精确模型匹配；空/"default" 为兜底
+  "channel_types": [1, 6],    // 可选，AND 前置条件
+  "error_codes": ["invalid_request"],    // OR
+  "status_codes": [400, 429],            // OR
+  "message_keywords": ["context_length"],// OR (Aho-Corasick)
+  "level": 0,                 // 0=排除, 1=普通, 2=较严重, 3=严重
+  "description": "说明"
+}
 ```
 
 #### 匹配逻辑
 
-- 规则内：`channel_types` 是 AND 条件（必须匹配），`error_codes` / `status_codes` / `message_keywords` 是 OR 条件（任一匹配即可）
-- 规则间：OR 关系，任一规则匹配则排除
-- 关键词匹配复用 `service.AcSearch`（Aho-Corasick 多模式匹配），大小写不敏感
-- 排除只影响统计计数，**不影响**重试决策、渠道禁用、错误日志等业务逻辑
+1. **模型优先级**：精确匹配 model > `default` 兜底（模型组无匹配时才查默认组）
+2. **规则内**：`model` + `channel_types` 是 AND 前置条件，`error_codes` / `status_codes` / `message_keywords` 是 OR
+3. **规则间**：OR 关系，任一规则命中即生效
+4. **关键词匹配**：复用 `service.AcSearch`（Aho-Corasick），大小写不敏感
+5. **约束**：排除只影响统计计数，**不影响**重试决策、渠道禁用、错误日志等业务逻辑
+
+#### 内置默认规则
+
+| 规则 | 条件 | 说明 |
+|------|------|------|
+| 客户端参数错误 | 400/422, `invalid_request`/`bad_request_body` 等 | 非渠道故障 |
+| 限流 | 429 | 暂时性 |
+| 内容安全 | `sensitive_words_detected`/`prompt_blocked`, safety/blocked 关键词 | 预期行为 |
+| 用户配额不足 | `insufficient_user_quota` 等 | 非渠道问题 |
+| Gemini 安全拦截 | channel_type=24 + safety/blocked/recitation | Gemini 特有 |
 
 #### 配置方式
 
-通过 DB Option 表的 `StatsErrorExclusionRules` 键存储 JSON，支持：
+- 通过 DB Option 表的 `StatsErrorExclusionRules` 键存储 JSON
 - 运行时动态更新（通过管理 API 或 Option 更新接口）
-- 定期从 DB 同步（`SyncOptions`）
+- 定期从 DB 同步（`SyncOptions`），DB 值覆盖内置默认
 
 ### 埋点位置
 
-在 `controller/relay.go` 的 `Relay()` 和 `RelayTask()` 重试循环中：
+#### 同步请求（`Relay()`）
+
+通过 `relayStatsTracker` 封装，消除重复代码：
 
 ```
+tracker := NewRelayStatsTracker(requestId, identity, false)
+
 重试循环 {
     getChannel()
-    attemptStart = time.Now()       ← 新增
+    attemptStart = time.Now()
     relayHandler()
-    attemptDuration = since(start)  ← 新增
+    attemptDuration = since(start)
 
     if 成功:
-        CollectAttempt(成功事件)      ← 新增
-        CollectRequestComplete(...)  ← 新增
+        tracker.TrackAttempt(成功事件)    // 分类器在 WindowBuffer 内部调用
+        tracker.Complete(true)
         return
 
-    CollectAttempt(失败事件)          ← 新增（classifier 在 collector 内部调用）
+    tracker.TrackAttempt(失败事件)        // Excluded/ErrorLevel 由分类器设置
     processChannelError()
     shouldRetry()
 }
 
-CollectRequestComplete(失败事件)      ← 新增（循环外，最终失败）
+tracker.Complete(false)
 ```
+
+#### 异步任务提交（`RelayTask()` / `RelayMidjourney()`）
+
+同样使用 `relayStatsTracker`，标记 `isAsync=true`。
+
+#### 异步任务执行完成（`task_polling.go`）
+
+任务到达终态时调用 `SafeCollectTaskExecution()`，含执行时间和 `fail_reason` 分类。
+
+#### Panic 捕获
+
+在 `main.go` 的 `gin.CustomRecovery` 中采集 `ErrorLevel=3` 的失败事件。
 
 所有采集调用通过 `safeCollect()` 包裹，panic 不影响业务。
 
 ### API 端点
 
-管理员权限（`RootAuth`），路由前缀 `/api/relay/stats`：
+**管理员权限（`RootAuth`）**，路由前缀 `/api/relay/stats`：
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/` | 返回聚合计数器 |
-| GET | `/recent?type=attempts&limit=100` | 返回最近事件明细（`type=attempts` 或 `requests`） |
+| GET | `/` | 返回全局原子计数器快照 |
+| GET | `/windows?limit=100` | 返回最近窗口摘要（含当前未 flush 窗口） |
+| GET | `/timeseries?group_by=model&metric=success_rate&interval=1h&range=24h` | 时间序列（图表用） |
+| GET | `/dimensions?group_by=model` | 维度聚合 |
 | POST | `/reset` | 重置所有统计 |
 | GET | `/exclusion_rules` | 获取当前排除规则 |
-| PUT | `/exclusion_rules` | 更新排除规则 |
+| PUT | `/exclusion_rules` | 更新排除规则（仅内存，需配合 DB 持久化） |
 
-聚合响应示例：
+**用户权限（`UserAuth`）**：
 
-```json
-{
-  "success": true,
-  "data": {
-    "total_requests": 15000,
-    "success_requests": 14500,
-    "failed_requests": 500,
-    "total_attempts": 16200,
-    "success_attempts": 15100,
-    "failed_attempts": 900,
-    "excluded_attempts": 200,
-    "retry_requests": 800,
-    "retry_recovered": 600,
-    "retry_recovery_rate": 0.75
-  }
-}
-```
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/models?start_timestamp=X&end_timestamp=Y` | 用户可见的每模型统计（不暴露渠道信息） |
+
+#### TimeSeries 参数
+
+| 参数 | 可选值 | 默认 |
+|------|--------|------|
+| `group_by` | `model`, `channel`, `group` | `model` |
+| `metric` | `success_rate`, `tps`, `avg_duration`, `avg_first_token`, `channel_score`, `request_success_rate`, `task_exec_success_rate` | `success_rate` |
+| `interval` | `5m`, `1h`, `6h` | `5m` |
+| `range` | `1h`, `6h`, `24h`, `7d` | `24h` |
 
 ### 维度聚合
 
-#### 设计方案
+采用 **查询时聚合（compute-on-read）** 方案：
 
-采用 **事件驱动、查询时聚合（compute-on-read）** 方案：
+- 写入路径：原始事件 → WindowBuffer（按 model+channel+group 分 bucket）→ 窗口摘要 → RingBuffer + DB
+- 查询路径：从 RingBuffer 快照 + 当前窗口 Peek 中按请求维度实时聚合
+- 新增维度：`RegisterWindowDimension("name", extractorFunc)`
 
-- 写入路径只做一件事：把事件推入 `RingBuffer`，同时更新全局 `atomicCounters`
-- 查询路径从 `RingBuffer` 快照中按请求维度实时聚合，无需预计算
-- 新增维度只需注册一个 extractor 函数，历史事件（缓冲区内）可立即回溯
+内置维度：
 
-#### 支持的维度
+| 维度 | 提取方式 |
+|------|---------|
+| `model` | `WindowSummary.ModelName` |
+| `channel` | `WindowSummary.ChannelID`（0 过滤） |
+| `group` | `WindowSummary.Group` |
 
-| 维度 | 事件类型 | 提取方式 |
-|------|---------|---------|
-| `model` | attempts / requests | `AttemptEvent.ModelName` / `RequestCompleteEvent.OriginalModel` |
-| `channel` | attempts | `AttemptEvent.ChannelID`（数字转字符串） |
-| `channel_type` | attempts | `AttemptEvent.ChannelType` |
-| `group` | attempts / requests | `Group` 字段 |
+多维度可组合：`group_by=model,channel` → 复合键 `"gpt-4:1"`
 
-多个维度可组合使用，例如 `group_by=model,channel` 会生成 `"gpt-4:1"` 形式的复合键。
+### 数据持久化
 
-#### 扩展自定义维度
-
-```go
-// 注册新的 attempt 维度
-service.RegisterAttemptDimension("region", func(e service.AttemptEvent) string {
-    return e.Region // 需先在 AttemptEvent 中添加该字段
-})
-
-// 注册新的 request 维度
-service.RegisterRequestDimension("user", func(e service.RequestCompleteEvent) string {
-    return strconv.Itoa(e.UserID)
-})
-```
-
-#### API
-
-```
-GET /api/relay/stats/dimensions?group_by=model&type=attempts
-GET /api/relay/stats/dimensions?group_by=model,channel&type=attempts
-GET /api/relay/stats/dimensions?group_by=model&type=requests
-```
-
-**参数：**
-
-- `group_by`：逗号分隔的维度名（`model`, `channel`, `channel_type`, `group`）
-- `type`：`attempts`（默认）或 `requests`
-
-**响应示例：**
-
-```json
-{
-  "success": true,
-  "data": {
-    "gpt-4": {
-      "total_attempts": 120,
-      "success_attempts": 100,
-      "failed_attempts": 15,
-      "excluded_attempts": 5
-    },
-    "claude-3": {
-      "total_attempts": 80,
-      "success_attempts": 75,
-      "failed_attempts": 5,
-      "excluded_attempts": 0
-    }
-  },
-  "group_by": ["model"],
-  "event_type": "attempts"
-}
-```
+| 组件 | 存储 | 恢复 |
+|------|------|------|
+| 窗口摘要 | 每次 flush 写入 `stats_window_summaries` 表 | 启动时从 DB 加载最近 7 天 |
+| 排除规则 | DB Option 表 `StatsErrorExclusionRules` | 启动时加载 |
+| 全局计数器 | 仅内存（原子操作） | 不持久化，重启归零 |
+| 旧数据清理 | 每小时检查，删除 7 天前的行 | — |
 
 ### 设计要点
 
-- **不影响业务**：采集失败静默忽略，`NoopCollector` 默认零开销
-- **排除只影响统计**：排除规则不影响 `shouldRetry`、`ShouldDisableChannel`、`processChannelError` 等
-- **接口扩展**：后续实现 `RedisStatsCollector` / `DBStatsCollector` 只需实现 `RelayStatsCollector` 接口
-- **线程安全**：计数器用 `atomic`，环形缓冲用 `sync.RWMutex`
-- **内存可控**：环形缓冲固定大小（默认 10000），写满覆盖最旧条目
-- **动态配置**：排除规则通过 DB 持久化，支持运行时更新，无需重启
-- **维度灵活**：compute-on-read 方案，新增维度无需改写入逻辑，缓冲区内历史事件可立即按新维度回溯
+- **不影响业务**：采集失败静默忽略，`noopCollector` 默认零开销
+- **排除只影响统计**：不影响 `shouldRetry`、`ShouldDisableChannel`、`processChannelError`
+- **时间窗口聚合**：5 分钟窗口，RingBuffer 10000 条 ≈ 覆盖 34 天
+- **实时查询**：`Peek()` 包含当前未 flush 窗口数据，TPS 最少用 30s 窗口避免尖刺
+- **线程安全**：计数器用 `atomic`，窗口缓冲/环形缓冲/维度提取器各有独立 `sync.Mutex`/`sync.RWMutex`
+- **接口扩展**：实现 `RelayStatsCollector` 接口即可替换存储后端
+- **动态配置**：排除规则通过 DB 持久化，支持运行时更新，内置 5 条默认规则开箱即用
