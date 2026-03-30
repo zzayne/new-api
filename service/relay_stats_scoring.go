@@ -1,83 +1,278 @@
 package service
 
-import "math"
+import (
+	"math"
+	"strings"
+	"sync"
 
-// Scoring weights (can be extracted to setting later)
-//
-// A perfectly healthy channel (100% success, fast responses) should score ~95.
-// Recovery bonus rewards resilience, pushing up to 100 for channels that
-// recover well from transient errors.
-const (
-	scoreBaseWeight     = 75.0 // max points from success rate
-	scoreSeverityMax    = 25.0 // max deduction from error severity
-	scoreRecoveryWeight = 5.0  // max points from retry recovery (bonus for resilience)
-	scoreSpeedWeight    = 20.0 // max points from response speed
-
-	// Response time thresholds (ms) for speed scoring
-	speedExcellentMs = 500
-	speedGoodMs      = 2000
-	speedOkMs        = 5000
-	speedSlowMs      = 10000
+	"github.com/QuantumNous/new-api/common"
 )
 
-// Error level weights for severity deduction
-var levelWeights = [4]float64{
-	0, // level 0: excluded, no deduction
-	1, // level 1: normal error
-	3, // level 2: serious
-	6, // level 3: critical
+// ScoreWeights holds all configurable parameters for ComputeChannelScore.
+// Sync and Async models use different scoring formulas.
+type ScoreWeights struct {
+	Sync         SyncScoreConfig  `json:"sync"`
+	Async        AsyncScoreConfig `json:"async"`
+	LevelWeights [4]float64       `json:"level_weights"`
+}
+
+// SyncScoreConfig weights for synchronous (chat/completion) models.
+// Factors: success rate, error severity, TPS, first-token speed, recovery.
+type SyncScoreConfig struct {
+	BaseWeight      float64        `json:"base_weight"`
+	SeverityMax     float64        `json:"severity_max"`
+	RecoveryWeight  float64        `json:"recovery_weight"`
+	SpeedWeight     float64        `json:"speed_weight"`
+	TPSWeight       float64        `json:"tps_weight"`
+	SpeedThresholds SpeedThreshold `json:"speed_thresholds"`
+	TPSThresholds   TPSThreshold   `json:"tps_thresholds"`
+}
+
+// AsyncScoreConfig weights for asynchronous (task) models.
+// Factors: submit success rate, submit speed, exec success rate, exec speed, recovery.
+type AsyncScoreConfig struct {
+	SubmitBaseWeight      float64        `json:"submit_base_weight"`
+	SeverityMax           float64        `json:"severity_max"`
+	RecoveryWeight        float64        `json:"recovery_weight"`
+	SubmitSpeedWeight     float64        `json:"submit_speed_weight"`
+	ExecSuccessWeight     float64        `json:"exec_success_weight"`
+	ExecSpeedWeight       float64        `json:"exec_speed_weight"`
+	SubmitSpeedThresholds SpeedThreshold `json:"submit_speed_thresholds"`
+	ExecSpeedThresholds   SpeedThreshold `json:"exec_speed_thresholds"`
+}
+
+type SpeedThreshold struct {
+	ExcellentMs float64 `json:"excellent_ms"`
+	GoodMs      float64 `json:"good_ms"`
+	OkMs        float64 `json:"ok_ms"`
+	SlowMs      float64 `json:"slow_ms"`
+}
+
+type TPSThreshold struct {
+	Excellent float64 `json:"excellent"`
+	Good      float64 `json:"good"`
+	Ok        float64 `json:"ok"`
+	Slow      float64 `json:"slow"`
+}
+
+var defaultScoreWeights = ScoreWeights{
+	Sync: SyncScoreConfig{
+		BaseWeight:     40.0,
+		SeverityMax:    15.0,
+		RecoveryWeight: 5.0,
+		SpeedWeight:    25.0,
+		TPSWeight:      30.0,
+		SpeedThresholds: SpeedThreshold{
+			ExcellentMs: 500,
+			GoodMs:      2000,
+			OkMs:        5000,
+			SlowMs:      10000,
+		},
+		TPSThresholds: TPSThreshold{
+			Excellent: 100,
+			Good:      50,
+			Ok:        20,
+			Slow:      5,
+		},
+	},
+	Async: AsyncScoreConfig{
+		SubmitBaseWeight:  30.0,
+		SeverityMax:       10.0,
+		RecoveryWeight:    5.0,
+		SubmitSpeedWeight: 15.0,
+		ExecSuccessWeight: 25.0,
+		ExecSpeedWeight:   25.0,
+		SubmitSpeedThresholds: SpeedThreshold{
+			ExcellentMs: 1000,
+			GoodMs:      3000,
+			OkMs:        8000,
+			SlowMs:      15000,
+		},
+		ExecSpeedThresholds: SpeedThreshold{
+			ExcellentMs: 30000,
+			GoodMs:      60000,
+			OkMs:        180000,
+			SlowMs:      600000,
+		},
+	},
+	LevelWeights: [4]float64{0, 1, 3, 6},
+}
+
+var (
+	scoreWeightsMu sync.RWMutex
+	activeWeights  = defaultScoreWeights
+)
+
+func GetScoreWeights() ScoreWeights {
+	scoreWeightsMu.RLock()
+	defer scoreWeightsMu.RUnlock()
+	return activeWeights
+}
+
+func SetScoreWeights(w ScoreWeights) {
+	scoreWeightsMu.Lock()
+	activeWeights = w
+	scoreWeightsMu.Unlock()
+}
+
+func UpdateScoreWeightsFromJSON(jsonStr string) error {
+	if strings.TrimSpace(jsonStr) == "" {
+		SetScoreWeights(defaultScoreWeights)
+		return nil
+	}
+	w := defaultScoreWeights
+	if err := common.Unmarshal([]byte(jsonStr), &w); err != nil {
+		return err
+	}
+	SetScoreWeights(w)
+	return nil
+}
+
+func ScoreWeightsToJSON() string {
+	w := GetScoreWeights()
+	data, err := common.Marshal(w)
+	if err != nil {
+		return "{}"
+	}
+	return string(data)
 }
 
 // ComputeChannelScore calculates a 0-100 health score for a window summary.
+// Automatically selects sync or async scoring based on whether the majority
+// of attempts in the window are async (task submits).
 func ComputeChannelScore(s WindowSummary) float64 {
+	if s.AsyncAttempts > 0 && s.AsyncAttempts*2 >= s.TotalAttempts {
+		return computeAsyncScore(s)
+	}
+	return computeSyncScore(s)
+}
+
+// computeSyncScore evaluates: success rate, TPS, first-token/response speed, recovery.
+// AvgDurationMs is per-attempt per-channel, so retry across channels does not inflate it.
+func computeSyncScore(s WindowSummary) float64 {
+	w := GetScoreWeights()
+	sc := w.Sync
+
 	effective := s.TotalAttempts - s.ExcludedAttempts
 	if effective <= 0 {
 		return 100
 	}
 
-	// Base score: success rate × 60
 	successRate := float64(s.SuccessAttempts) / float64(effective)
-	base := successRate * scoreBaseWeight
+	base := successRate * sc.BaseWeight
 
-	// Severity deduction: weighted sum of error levels
-	var severityDeduction float64
+	severityDeduction := computeSeverityDeduction(s, effective, sc.SeverityMax, w.LevelWeights)
+
+	var recoveryBonus float64
+	if s.RetryRequests > 0 {
+		recoveryBonus = float64(s.RetryRecovered) / float64(s.RetryRequests) * sc.RecoveryWeight
+	}
+
+	// Prefer first-token latency; fall back to average duration
+	speedMs := s.AvgFirstTokenMs
+	if speedMs <= 0 {
+		speedMs = s.AvgDurationMs
+	}
+	speedBonus := tieredScore(speedMs, sc.SpeedWeight, sc.SpeedThresholds, true)
+
+	tpsBonus := tieredScoreHigherBetter(s.AvgOutputTPS, sc.TPSWeight, sc.TPSThresholds)
+
+	score := base - severityDeduction + recoveryBonus + speedBonus + tpsBonus
+	return math.Max(0, math.Min(100, score))
+}
+
+// computeAsyncScore evaluates: submit success rate, submit speed, exec success rate,
+// exec speed (duration), recovery.
+func computeAsyncScore(s WindowSummary) float64 {
+	w := GetScoreWeights()
+	ac := w.Async
+
+	effective := s.TotalAttempts - s.ExcludedAttempts
+	if effective <= 0 {
+		return 100
+	}
+
+	successRate := float64(s.SuccessAttempts) / float64(effective)
+	base := successRate * ac.SubmitBaseWeight
+
+	severityDeduction := computeSeverityDeduction(s, effective, ac.SeverityMax, w.LevelWeights)
+
+	var recoveryBonus float64
+	if s.RetryRequests > 0 {
+		recoveryBonus = float64(s.RetryRecovered) / float64(s.RetryRequests) * ac.RecoveryWeight
+	}
+
+	submitSpeedBonus := tieredScore(s.AvgDurationMs, ac.SubmitSpeedWeight, ac.SubmitSpeedThresholds, true)
+
+	var execSuccessBonus float64
+	if s.TaskExecCount > 0 {
+		execRate := float64(s.TaskExecSuccess) / float64(s.TaskExecCount)
+		execSuccessBonus = execRate * ac.ExecSuccessWeight
+	} else {
+		execSuccessBonus = ac.ExecSuccessWeight * 0.5
+	}
+
+	execSpeedBonus := tieredScore(s.AvgExecDurationMs, ac.ExecSpeedWeight, ac.ExecSpeedThresholds, true)
+
+	score := base - severityDeduction + recoveryBonus + submitSpeedBonus + execSuccessBonus + execSpeedBonus
+	return math.Max(0, math.Min(100, score))
+}
+
+func computeSeverityDeduction(s WindowSummary, effective int64, severityMax float64, levelWeights [4]float64) float64 {
+	var deduction float64
 	for lvl := 1; lvl <= 3; lvl++ {
 		count := s.ErrorLevelDist[lvl]
 		if count > 0 {
 			ratio := float64(count) / float64(effective)
-			severityDeduction += levelWeights[lvl] * ratio * scoreSeverityMax
+			deduction += levelWeights[lvl] * ratio * severityMax
 		}
 	}
-	severityDeduction = math.Min(severityDeduction, scoreSeverityMax)
-
-	// Recovery bonus: recovery rate × 10
-	var recoveryBonus float64
-	if s.RetryRequests > 0 {
-		recoveryBonus = float64(s.RetryRecovered) / float64(s.RetryRequests) * scoreRecoveryWeight
-	}
-
-	// Speed bonus: based on average response time
-	speedBonus := computeSpeedScore(s.AvgDurationMs)
-
-	score := base - severityDeduction + recoveryBonus + speedBonus
-	return math.Max(0, math.Min(100, score))
+	return math.Min(deduction, severityMax)
 }
 
-func computeSpeedScore(avgMs float64) float64 {
-	if avgMs <= 0 {
-		// No timing data available — return half score to avoid inflating scores
-		// for channels with insufficient data.
-		return scoreSpeedWeight * 0.5
+// tieredScore maps a metric value (lower is better, e.g. latency ms) to a score.
+// Returns half weight when no data (value <= 0).
+func tieredScore(value, weight float64, th SpeedThreshold, lowerIsBetter bool) float64 {
+	if weight <= 0 {
+		return 0
+	}
+	if value <= 0 {
+		return weight * 0.5
+	}
+	if !lowerIsBetter {
+		return 0
 	}
 	switch {
-	case avgMs <= speedExcellentMs:
-		return scoreSpeedWeight
-	case avgMs <= speedGoodMs:
-		return scoreSpeedWeight * 0.8
-	case avgMs <= speedOkMs:
-		return scoreSpeedWeight * 0.5
-	case avgMs <= speedSlowMs:
-		return scoreSpeedWeight * 0.2
+	case value <= th.ExcellentMs:
+		return weight
+	case value <= th.GoodMs:
+		return weight * 0.8
+	case value <= th.OkMs:
+		return weight * 0.5
+	case value <= th.SlowMs:
+		return weight * 0.2
+	default:
+		return 0
+	}
+}
+
+// tieredScoreHigherBetter maps a metric value (higher is better, e.g. tokens/sec) to a score.
+func tieredScoreHigherBetter(value, weight float64, th TPSThreshold) float64 {
+	if weight <= 0 {
+		return 0
+	}
+	if value <= 0 {
+		return weight * 0.5
+	}
+	switch {
+	case value >= th.Excellent:
+		return weight
+	case value >= th.Good:
+		return weight * 0.8
+	case value >= th.Ok:
+		return weight * 0.5
+	case value >= th.Slow:
+		return weight * 0.2
 	default:
 		return 0
 	}

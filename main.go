@@ -114,7 +114,7 @@ func main() {
 
 	// Initialize relay stats collector and wire DB persistence
 	service.InitRelayStats()
-	service.SetupStatsPersistence(model.DB)
+	service.SetupStatsPersistence(model.LOG_DB)
 
 	// Wire task polling adaptor factory (breaks service -> relay import cycle)
 	service.GetTaskAdaptorFunc = func(platform constant.TaskPlatform) service.TaskPollingAdaptor {

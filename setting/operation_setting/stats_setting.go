@@ -1,5 +1,17 @@
 package operation_setting
 
+import "sync/atomic"
+
+// RelayStatsEnabled controls whether relay stats collection is active.
+var relayStatsEnabled atomic.Bool
+
+func init() {
+	relayStatsEnabled.Store(false)
+}
+
+func IsRelayStatsEnabled() bool  { return relayStatsEnabled.Load() }
+func SetRelayStatsEnabled(v bool) { relayStatsEnabled.Store(v) }
+
 // StatsErrorExclusionRulesJSON holds the raw JSON for stats error exclusion rules.
 // Parsed and applied by service.InitRelayStats via the OnStatsExclusionRulesUpdate callback.
 // Default rules exclude common non-channel-fault errors from statistics.
@@ -11,9 +23,15 @@ var StatsErrorExclusionRulesJSON = `[
   {"channel_types":[24],"error_codes":["prompt_blocked"],"message_keywords":["safety","blocked","recitation"],"level":0,"description":"Gemini safety blocks"}
 ]`
 
+// StatsScoreWeightsJSON holds the configurable scoring weights for ComputeChannelScore.
+var StatsScoreWeightsJSON = ""
+
 // OnStatsExclusionRulesUpdate is a callback set by the service layer to apply
 // rule updates without creating a circular dependency (model -> service).
 var OnStatsExclusionRulesUpdate func(jsonStr string) error
+
+// OnStatsScoreWeightsUpdate is a callback set by the service layer.
+var OnStatsScoreWeightsUpdate func(jsonStr string) error
 
 func StatsErrorExclusionRulesToString() string {
 	return StatsErrorExclusionRulesJSON
@@ -23,6 +41,18 @@ func StatsErrorExclusionRulesFromString(s string) error {
 	StatsErrorExclusionRulesJSON = s
 	if OnStatsExclusionRulesUpdate != nil {
 		return OnStatsExclusionRulesUpdate(s)
+	}
+	return nil
+}
+
+func StatsScoreWeightsToString() string {
+	return StatsScoreWeightsJSON
+}
+
+func StatsScoreWeightsFromString(s string) error {
+	StatsScoreWeightsJSON = s
+	if OnStatsScoreWeightsUpdate != nil {
+		return OnStatsScoreWeightsUpdate(s)
 	}
 	return nil
 }

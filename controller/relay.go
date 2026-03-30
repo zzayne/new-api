@@ -213,6 +213,9 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		}
 		c.Request.Body = io.NopCloser(bodyStorage)
 
+		// Resolve the actual group for this attempt (auto group may differ per retry)
+		actualGroup := resolveActualGroup(c, relayInfo)
+
 		attemptStart := time.Now()
 		switch relayFormat {
 		case types.RelayFormatOpenAIRealtime:
@@ -228,16 +231,18 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 
 		if newAPIError == nil {
 			relayInfo.LastError = nil
+			completionTokens := common.GetContextKeyInt(c, constant.ContextKeyCompletionTokens)
 			tracker.TrackAttempt(&service.AttemptEvent{
-				RequestID:    requestId,
-				AttemptIndex: retryParam.GetRetry(),
-				ChannelID:    channel.Id,
-				ChannelType:  channel.Type,
-				ChannelName:  channel.Name,
-				ModelName:    relayInfo.OriginModelName,
-				Group:        relayInfo.UsingGroup,
-				Success:      true,
-				Duration:     attemptDuration,
+				RequestID:        requestId,
+				AttemptIndex:     retryParam.GetRetry(),
+				ChannelID:        channel.Id,
+				ChannelType:      channel.Type,
+				ChannelName:      channel.Name,
+				ModelName:        relayInfo.OriginModelName,
+				Group:            actualGroup,
+				Success:          true,
+				Duration:         attemptDuration,
+				CompletionTokens: completionTokens,
 			})
 			tracker.Complete(true)
 			return
@@ -253,7 +258,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			ChannelType:  channel.Type,
 			ChannelName:  channel.Name,
 			ModelName:    relayInfo.OriginModelName,
-			Group:        relayInfo.UsingGroup,
+			Group:        actualGroup,
 			Success:      false,
 			StatusCode:   newAPIError.StatusCode,
 			ErrorCode:    string(newAPIError.GetErrorCode()),
@@ -464,9 +469,10 @@ func RelayMidjourney(c *gin.Context) {
 		relayInfo.RelayMode != relayconstant.RelayModeMidjourneyTaskFetchByCondition &&
 		relayInfo.RelayMode != relayconstant.RelayModeMidjourneyTaskImageSeed
 	if isSubmitMode {
+		mjActualGroup := resolveActualGroup(c, relayInfo)
 		mjTracker := service.NewRelayStatsTracker(c.GetString(common.RequestIdKey), service.RelayIdentity{
 			UserID: relayInfo.UserId, TokenID: relayInfo.TokenId,
-			Group: relayInfo.UsingGroup, ModelName: relayInfo.OriginModelName, RelayMode: relayInfo.RelayMode,
+			Group: mjActualGroup, ModelName: relayInfo.OriginModelName, RelayMode: relayInfo.RelayMode,
 		}, true)
 		evt := &service.AttemptEvent{
 			RequestID:   c.GetString(common.RequestIdKey),
@@ -474,7 +480,7 @@ func RelayMidjourney(c *gin.Context) {
 			ChannelType: c.GetInt("channel_type"),
 			ChannelName: c.GetString("channel_name"),
 			ModelName:   relayInfo.OriginModelName,
-			Group:       relayInfo.UsingGroup,
+			Group:       mjActualGroup,
 			Success:     mjErr == nil,
 			Duration:    mjDuration,
 		}
@@ -612,6 +618,8 @@ func RelayTask(c *gin.Context) {
 		}
 		c.Request.Body = io.NopCloser(bodyStorage)
 
+		taskActualGroup := resolveActualGroup(c, relayInfo)
+
 		taskAttemptStart := time.Now()
 		result, taskErr = relay.RelayTaskSubmit(c, relayInfo)
 		taskAttemptDuration := time.Since(taskAttemptStart)
@@ -624,7 +632,7 @@ func RelayTask(c *gin.Context) {
 				ChannelType:  channel.Type,
 				ChannelName:  channel.Name,
 				ModelName:    relayInfo.OriginModelName,
-				Group:        relayInfo.UsingGroup,
+				Group:        taskActualGroup,
 				Success:      true,
 				Duration:     taskAttemptDuration,
 			})
@@ -638,7 +646,7 @@ func RelayTask(c *gin.Context) {
 			ChannelType:  channel.Type,
 			ChannelName:  channel.Name,
 			ModelName:    relayInfo.OriginModelName,
-			Group:        relayInfo.UsingGroup,
+			Group:        taskActualGroup,
 			Success:      false,
 			StatusCode:   taskErr.StatusCode,
 			ErrorCode:    taskErr.Code,
@@ -705,6 +713,18 @@ func respondTaskError(c *gin.Context, taskErr *dto.TaskError) {
 		taskErr.Message = "当前分组上游负载已饱和，请稍后再试"
 	}
 	c.JSON(taskErr.StatusCode, taskErr)
+}
+
+// resolveActualGroup returns the concrete group name for stats tracking.
+// For auto-group tokens, it reads the resolved auto group from context;
+// for normal tokens, it uses relayInfo.UsingGroup directly.
+func resolveActualGroup(c *gin.Context, info *relaycommon.RelayInfo) string {
+	if info.TokenGroup == "auto" {
+		if ag := common.GetContextKeyString(c, constant.ContextKeyAutoGroup); ag != "" {
+			return ag
+		}
+	}
+	return info.UsingGroup
 }
 
 func shouldRetryTaskRelay(c *gin.Context, channelId int, taskErr *dto.TaskError, retryTimes int) bool {

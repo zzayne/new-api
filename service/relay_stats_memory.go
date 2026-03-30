@@ -474,6 +474,11 @@ func extractMetricValue(agg windowAgg, metric string) float64 {
 			return float64(agg.totalAttempts) / agg.windowSeconds
 		}
 		return 0
+	case "avg_output_tps":
+		if agg.successDurationNs > 0 && agg.totalCompletionTokens > 0 {
+			return float64(agg.totalCompletionTokens) / (float64(agg.successDurationNs) / 1e9)
+		}
+		return 0
 	case "avg_duration":
 		if agg.totalAttempts > 0 {
 			return float64(agg.totalDurationNs) / float64(agg.totalAttempts) / 1e6
@@ -525,6 +530,7 @@ func max64(a, b int64) int64 {
 
 type windowAgg struct {
 	totalAttempts     int64
+	asyncAttempts     int64
 	successAttempts   int64
 	failedAttempts    int64
 	excludedAttempts  int64
@@ -533,6 +539,9 @@ type windowAgg struct {
 	firstTokenCount   int64
 	windowSeconds     float64
 	windowCount       int
+
+	totalCompletionTokens int64
+	successDurationNs     int64
 
 	totalRequests   int64
 	successRequests int64
@@ -549,6 +558,7 @@ type windowAgg struct {
 
 func (a *windowAgg) addWindow(w WindowSummary) {
 	a.totalAttempts += w.TotalAttempts
+	a.asyncAttempts += w.AsyncAttempts
 	a.successAttempts += w.SuccessAttempts
 	a.failedAttempts += w.FailedAttempts
 	a.excludedAttempts += w.ExcludedAttempts
@@ -557,6 +567,9 @@ func (a *windowAgg) addWindow(w WindowSummary) {
 	a.firstTokenCount += w.FirstTokenCount
 	a.windowSeconds += w.WindowEnd.Sub(w.WindowStart).Seconds()
 	a.windowCount++
+
+	a.totalCompletionTokens += w.TotalCompletionTokens
+	a.successDurationNs += w.SuccessDurationNs
 
 	a.totalRequests += w.TotalRequests
 	a.successRequests += w.SuccessRequests
@@ -587,6 +600,10 @@ func (a *windowAgg) toCounters() StatsCounters {
 	if a.windowSeconds > 0 {
 		tps = float64(a.totalAttempts) / a.windowSeconds
 	}
+	var avgOutputTPS float64
+	if a.successDurationNs > 0 && a.totalCompletionTokens > 0 {
+		avgOutputTPS = float64(a.totalCompletionTokens) / (float64(a.successDurationNs) / 1e9)
+	}
 	if a.taskExecCount > 0 {
 		avgExec = float64(a.taskExecDurationNs) / float64(a.taskExecCount) / 1e6
 	}
@@ -602,6 +619,7 @@ func (a *windowAgg) toCounters() StatsCounters {
 		RetryRecovered:    a.retryRecovered,
 		RecoveryRate:      recoveryRate,
 		TPS:              tps,
+		AvgOutputTPS:     avgOutputTPS,
 		AvgDurationMs:    avgDur,
 		AvgFirstTokenMs:  avgFT,
 		TaskExecCount:    a.taskExecCount,

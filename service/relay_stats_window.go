@@ -19,6 +19,7 @@ type WindowSummary struct {
 
 	// Attempt-level (sync + async submit)
 	TotalAttempts        int64      `json:"total_attempts"`
+	AsyncAttempts        int64      `json:"async_attempts"`
 	SuccessAttempts      int64      `json:"success_attempts"`
 	FailedAttempts       int64      `json:"failed_attempts"`
 	ExcludedAttempts     int64      `json:"excluded_attempts"`
@@ -29,6 +30,11 @@ type WindowSummary struct {
 	TotalDurationNs      int64      `json:"-"`
 	TotalFirstTokenNs    int64      `json:"-"`
 	FirstTokenCount      int64      `json:"-"`
+
+	// Output token throughput (completion tokens / second)
+	TotalCompletionTokens int64   `json:"-"`
+	SuccessDurationNs     int64   `json:"-"`
+	AvgOutputTPS          float64 `json:"avg_output_tps"`
 
 	// Request-level (final outcome)
 	TotalRequests   int64   `json:"total_requests"`
@@ -58,6 +64,7 @@ type windowBucketKey struct {
 // windowBucket accumulates raw counters during one time window.
 type windowBucket struct {
 	totalAttempts     int64
+	asyncAttempts     int64
 	successAttempts   int64
 	failedAttempts    int64
 	excludedAttempts  int64
@@ -65,6 +72,9 @@ type windowBucket struct {
 	totalDurationNs   int64
 	totalFirstTokenNs int64
 	firstTokenCount   int64
+
+	totalCompletionTokens int64
+	successDurationNs     int64
 
 	totalRequests   int64
 	successRequests int64
@@ -166,6 +176,9 @@ func (wb *WindowBuffer) CollectAttempt(event *AttemptEvent) {
 	b := wb.getBucket(key)
 
 	b.totalAttempts++
+	if event.IsAsync {
+		b.asyncAttempts++
+	}
 	if event.Success {
 		b.successAttempts++
 	} else if event.Excluded {
@@ -187,6 +200,10 @@ func (wb *WindowBuffer) CollectAttempt(event *AttemptEvent) {
 	if event.FirstTokenDuration > 0 {
 		b.totalFirstTokenNs += int64(event.FirstTokenDuration)
 		b.firstTokenCount++
+	}
+	if event.Success && event.CompletionTokens > 0 {
+		b.totalCompletionTokens += int64(event.CompletionTokens)
+		b.successDurationNs += int64(event.Duration)
 	}
 }
 
@@ -250,27 +267,30 @@ func buildSummaries(buckets map[windowBucketKey]*windowBucket, windowStart, wind
 	summaries := make([]WindowSummary, 0, len(buckets))
 	for key, b := range buckets {
 		s := WindowSummary{
-			WindowStart:       windowStart,
-			WindowEnd:         windowEnd,
-			ModelName:         key.ModelName,
-			ChannelID:         key.ChannelID,
-			Group:             key.Group,
-			TotalAttempts:     b.totalAttempts,
-			SuccessAttempts:   b.successAttempts,
-			FailedAttempts:    b.failedAttempts,
-			ExcludedAttempts:  b.excludedAttempts,
-			ErrorLevelDist:    b.errorLevelDist,
-			TotalDurationNs:   b.totalDurationNs,
-			TotalFirstTokenNs: b.totalFirstTokenNs,
-			FirstTokenCount:   b.firstTokenCount,
-			TotalRequests:     b.totalRequests,
-			SuccessRequests:   b.successRequests,
-			FailedRequests:    b.failedRequests,
-			RetryRequests:     b.retryRequests,
-			RetryRecovered:    b.retryRecovered,
-			TaskExecCount:     b.taskExecCount,
-			TaskExecSuccess:   b.taskExecSuccess,
-			TaskExecDurationNs: b.taskExecDurationNs,
+			WindowStart:           windowStart,
+			WindowEnd:             windowEnd,
+			ModelName:             key.ModelName,
+			ChannelID:             key.ChannelID,
+			Group:                 key.Group,
+			TotalAttempts:         b.totalAttempts,
+			AsyncAttempts:         b.asyncAttempts,
+			SuccessAttempts:       b.successAttempts,
+			FailedAttempts:        b.failedAttempts,
+			ExcludedAttempts:      b.excludedAttempts,
+			ErrorLevelDist:        b.errorLevelDist,
+			TotalDurationNs:       b.totalDurationNs,
+			TotalFirstTokenNs:     b.totalFirstTokenNs,
+			FirstTokenCount:       b.firstTokenCount,
+			TotalCompletionTokens: b.totalCompletionTokens,
+			SuccessDurationNs:     b.successDurationNs,
+			TotalRequests:         b.totalRequests,
+			SuccessRequests:       b.successRequests,
+			FailedRequests:        b.failedRequests,
+			RetryRequests:         b.retryRequests,
+			RetryRecovered:        b.retryRecovered,
+			TaskExecCount:         b.taskExecCount,
+			TaskExecSuccess:       b.taskExecSuccess,
+			TaskExecDurationNs:    b.taskExecDurationNs,
 		}
 		if b.totalAttempts > 0 {
 			s.TPS = float64(b.totalAttempts) / windowSecs
@@ -278,6 +298,9 @@ func buildSummaries(buckets map[windowBucketKey]*windowBucket, windowStart, wind
 		}
 		if b.firstTokenCount > 0 {
 			s.AvgFirstTokenMs = float64(b.totalFirstTokenNs) / float64(b.firstTokenCount) / 1e6
+		}
+		if b.successDurationNs > 0 && b.totalCompletionTokens > 0 {
+			s.AvgOutputTPS = float64(b.totalCompletionTokens) / (float64(b.successDurationNs) / 1e9)
 		}
 		if b.retryRequests > 0 {
 			s.RecoveryRate = float64(b.retryRecovered) / float64(b.retryRequests)

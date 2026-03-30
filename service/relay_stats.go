@@ -61,6 +61,7 @@ type AttemptEvent struct {
 	ErrorLevel         int           `json:"error_level,omitempty"`
 	Duration           time.Duration `json:"duration_ns"`
 	FirstTokenDuration time.Duration `json:"first_token_duration_ns,omitempty"`
+	CompletionTokens   int           `json:"completion_tokens,omitempty"`
 	Excluded           bool          `json:"excluded"`
 	ExcludeReason      string        `json:"exclude_reason,omitempty"`
 }
@@ -126,6 +127,7 @@ type StatsCounters struct {
 	FailedAttempts   int64   `json:"failed_attempts"`
 	ExcludedAttempts int64   `json:"excluded_attempts"`
 	TPS              float64 `json:"tps,omitempty"`
+	AvgOutputTPS     float64 `json:"avg_output_tps,omitempty"`
 	AvgDurationMs    float64 `json:"avg_duration_ms,omitempty"`
 	AvgFirstTokenMs  float64 `json:"avg_first_token_ms,omitempty"`
 
@@ -253,14 +255,23 @@ func GetErrorClassifier() ErrorClassifier             { classifierMu.RLock(); de
 func safeCollect(fn func()) { defer func() { recover() }(); fn() }
 
 func SafeCollectAttempt(collector RelayStatsCollector, event *AttemptEvent) {
+	if !operation_setting.IsRelayStatsEnabled() {
+		return
+	}
 	safeCollect(func() { collector.CollectAttempt(event) })
 }
 
 func SafeCollectRequestComplete(collector RelayStatsCollector, event RequestCompleteEvent) {
+	if !operation_setting.IsRelayStatsEnabled() {
+		return
+	}
 	safeCollect(func() { collector.CollectRequestComplete(event) })
 }
 
 func SafeCollectTaskExecution(collector RelayStatsCollector, event TaskExecutionEvent) {
+	if !operation_setting.IsRelayStatsEnabled() {
+		return
+	}
 	safeCollect(func() { collector.CollectTaskExecution(event) })
 }
 
@@ -282,9 +293,13 @@ func InitRelayStats() {
 	SetRelayStatsCollector(collector)
 
 	operation_setting.OnStatsExclusionRulesUpdate = StatsErrorExclusionRulesFromJSON
+	operation_setting.OnStatsScoreWeightsUpdate = UpdateScoreWeightsFromJSON
 
 	if json := operation_setting.StatsErrorExclusionRulesJSON; json != "" && json != "[]" {
 		_ = StatsErrorExclusionRulesFromJSON(json)
+	}
+	if json := operation_setting.StatsScoreWeightsJSON; json != "" {
+		_ = UpdateScoreWeightsFromJSON(json)
 	}
 }
 

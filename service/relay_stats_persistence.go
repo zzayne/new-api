@@ -31,6 +31,7 @@ type statsWindowSummaryRow struct {
 	GroupName string `gorm:"column:group_name;type:varchar(64)"`
 
 	TotalAttempts     int64
+	AsyncAttempts     int64
 	SuccessAttempts   int64
 	FailedAttempts    int64
 	ExcludedAttempts  int64
@@ -42,9 +43,13 @@ type statsWindowSummaryRow struct {
 	TotalFirstTokenNs int64
 	FirstTokenCount   int64
 
+	TotalCompletionTokens int64
+	SuccessDurationNs     int64
+
 	TPS             float64
 	AvgDurationMs   float64
 	AvgFirstTokenMs float64
+	AvgOutputTPS    float64
 
 	TotalRequests   int64
 	SuccessRequests int64
@@ -119,68 +124,76 @@ func (d *dbPersistence) DeleteBefore(before time.Time) (int64, error) {
 
 func toRow(s WindowSummary) statsWindowSummaryRow {
 	return statsWindowSummaryRow{
-		WindowStart:       s.WindowStart,
-		WindowEnd:         s.WindowEnd,
-		ModelName:         s.ModelName,
-		ChannelID:         s.ChannelID,
-		GroupName:         s.Group,
-		TotalAttempts:     s.TotalAttempts,
-		SuccessAttempts:   s.SuccessAttempts,
-		FailedAttempts:    s.FailedAttempts,
-		ExcludedAttempts:  s.ExcludedAttempts,
-		ErrorLevel0:       s.ErrorLevelDist[0],
-		ErrorLevel1:       s.ErrorLevelDist[1],
-		ErrorLevel2:       s.ErrorLevelDist[2],
-		ErrorLevel3:       s.ErrorLevelDist[3],
-		TotalDurationNs:   s.TotalDurationNs,
-		TotalFirstTokenNs: s.TotalFirstTokenNs,
-		FirstTokenCount:   s.FirstTokenCount,
-		TPS:               s.TPS,
-		AvgDurationMs:     s.AvgDurationMs,
-		AvgFirstTokenMs:   s.AvgFirstTokenMs,
-		TotalRequests:     s.TotalRequests,
-		SuccessRequests:   s.SuccessRequests,
-		FailedRequests:    s.FailedRequests,
-		RetryRequests:     s.RetryRequests,
-		RetryRecovered:    s.RetryRecovered,
-		RecoveryRate:      s.RecoveryRate,
-		TaskExecCount:     s.TaskExecCount,
-		TaskExecSuccess:   s.TaskExecSuccess,
-		TaskExecDurationNs: s.TaskExecDurationNs,
-		AvgExecDurationMs: s.AvgExecDurationMs,
-		ChannelScore:      s.ChannelScore,
+		WindowStart:           s.WindowStart,
+		WindowEnd:             s.WindowEnd,
+		ModelName:             s.ModelName,
+		ChannelID:             s.ChannelID,
+		GroupName:             s.Group,
+		TotalAttempts:         s.TotalAttempts,
+		AsyncAttempts:         s.AsyncAttempts,
+		SuccessAttempts:       s.SuccessAttempts,
+		FailedAttempts:        s.FailedAttempts,
+		ExcludedAttempts:      s.ExcludedAttempts,
+		ErrorLevel0:           s.ErrorLevelDist[0],
+		ErrorLevel1:           s.ErrorLevelDist[1],
+		ErrorLevel2:           s.ErrorLevelDist[2],
+		ErrorLevel3:           s.ErrorLevelDist[3],
+		TotalDurationNs:       s.TotalDurationNs,
+		TotalFirstTokenNs:     s.TotalFirstTokenNs,
+		FirstTokenCount:       s.FirstTokenCount,
+		TotalCompletionTokens: s.TotalCompletionTokens,
+		SuccessDurationNs:     s.SuccessDurationNs,
+		TPS:                   s.TPS,
+		AvgDurationMs:         s.AvgDurationMs,
+		AvgFirstTokenMs:       s.AvgFirstTokenMs,
+		AvgOutputTPS:          s.AvgOutputTPS,
+		TotalRequests:         s.TotalRequests,
+		SuccessRequests:       s.SuccessRequests,
+		FailedRequests:        s.FailedRequests,
+		RetryRequests:         s.RetryRequests,
+		RetryRecovered:        s.RetryRecovered,
+		RecoveryRate:          s.RecoveryRate,
+		TaskExecCount:         s.TaskExecCount,
+		TaskExecSuccess:       s.TaskExecSuccess,
+		TaskExecDurationNs:    s.TaskExecDurationNs,
+		AvgExecDurationMs:     s.AvgExecDurationMs,
+		ChannelScore:          s.ChannelScore,
 	}
 }
 
 func fromRow(r statsWindowSummaryRow) WindowSummary {
 	return WindowSummary{
-		WindowStart:       r.WindowStart,
-		WindowEnd:         r.WindowEnd,
-		ModelName:         r.ModelName,
-		ChannelID:         r.ChannelID,
-		Group:             r.GroupName,
-		TotalAttempts:     r.TotalAttempts,
-		SuccessAttempts:   r.SuccessAttempts,
-		FailedAttempts:    r.FailedAttempts,
-		ExcludedAttempts:  r.ExcludedAttempts,
-		ErrorLevelDist:    [4]int64{r.ErrorLevel0, r.ErrorLevel1, r.ErrorLevel2, r.ErrorLevel3},
-		TotalDurationNs:   r.TotalDurationNs,
-		TotalFirstTokenNs: r.TotalFirstTokenNs,
-		FirstTokenCount:   r.FirstTokenCount,
-		TPS:               r.TPS,
-		AvgDurationMs:     r.AvgDurationMs,
-		AvgFirstTokenMs:   r.AvgFirstTokenMs,
-		TotalRequests:     r.TotalRequests,
-		SuccessRequests:   r.SuccessRequests,
-		FailedRequests:    r.FailedRequests,
-		RetryRequests:     r.RetryRequests,
-		RetryRecovered:    r.RetryRecovered,
-		RecoveryRate:      r.RecoveryRate,
-		TaskExecCount:     r.TaskExecCount,
-		TaskExecSuccess:   r.TaskExecSuccess,
-		TaskExecDurationNs: r.TaskExecDurationNs,
-		AvgExecDurationMs: r.AvgExecDurationMs,
-		ChannelScore:      r.ChannelScore,
+		WindowStart:           r.WindowStart,
+		WindowEnd:             r.WindowEnd,
+		ModelName:             r.ModelName,
+		ChannelID:             r.ChannelID,
+		Group:                 r.GroupName,
+		TotalAttempts:         r.TotalAttempts,
+		AsyncAttempts:         r.AsyncAttempts,
+		SuccessAttempts:       r.SuccessAttempts,
+		FailedAttempts:        r.FailedAttempts,
+		ExcludedAttempts:      r.ExcludedAttempts,
+		ErrorLevelDist:        [4]int64{r.ErrorLevel0, r.ErrorLevel1, r.ErrorLevel2, r.ErrorLevel3},
+		TotalDurationNs:       r.TotalDurationNs,
+		TotalFirstTokenNs:     r.TotalFirstTokenNs,
+		FirstTokenCount:       r.FirstTokenCount,
+		TotalCompletionTokens: r.TotalCompletionTokens,
+		SuccessDurationNs:     r.SuccessDurationNs,
+		TPS:                   r.TPS,
+		AvgDurationMs:         r.AvgDurationMs,
+		AvgFirstTokenMs:       r.AvgFirstTokenMs,
+		AvgOutputTPS:          r.AvgOutputTPS,
+		TotalRequests:         r.TotalRequests,
+		SuccessRequests:       r.SuccessRequests,
+		FailedRequests:        r.FailedRequests,
+		RetryRequests:         r.RetryRequests,
+		RetryRecovered:        r.RetryRecovered,
+		RecoveryRate:          r.RecoveryRate,
+		TaskExecCount:         r.TaskExecCount,
+		TaskExecSuccess:       r.TaskExecSuccess,
+		TaskExecDurationNs:    r.TaskExecDurationNs,
+		AvgExecDurationMs:     r.AvgExecDurationMs,
+		ChannelScore:          r.ChannelScore,
 	}
 }
 
