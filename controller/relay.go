@@ -232,17 +232,22 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		if newAPIError == nil {
 			relayInfo.LastError = nil
 			completionTokens := common.GetContextKeyInt(c, constant.ContextKeyCompletionTokens)
+			var firstTokenDur time.Duration
+			if relayInfo.IsStream && relayInfo.FirstResponseTime.After(attemptStart) {
+				firstTokenDur = relayInfo.FirstResponseTime.Sub(attemptStart)
+			}
 			tracker.TrackAttempt(&service.AttemptEvent{
-				RequestID:        requestId,
-				AttemptIndex:     retryParam.GetRetry(),
-				ChannelID:        channel.Id,
-				ChannelType:      channel.Type,
-				ChannelName:      channel.Name,
-				ModelName:        relayInfo.OriginModelName,
-				Group:            actualGroup,
-				Success:          true,
-				Duration:         attemptDuration,
-				CompletionTokens: completionTokens,
+				RequestID:          requestId,
+				AttemptIndex:       retryParam.GetRetry(),
+				ChannelID:          channel.Id,
+				ChannelType:        channel.Type,
+				ChannelName:        channel.Name,
+				ModelName:          relayInfo.OriginModelName,
+				Group:              actualGroup,
+				Success:            true,
+				Duration:           attemptDuration,
+				FirstTokenDuration: firstTokenDur,
+				CompletionTokens:   completionTokens,
 			})
 			tracker.Complete(true)
 			return

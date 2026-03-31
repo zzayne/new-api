@@ -205,9 +205,11 @@ func SetApiRouter(router *gin.Engine) {
 			relayStatsRoute.GET("/windows", controller.GetRelayStatsWindows)
 			relayStatsRoute.GET("/timeseries", controller.GetRelayStatsTimeSeries)
 			relayStatsRoute.GET("/dimensions", controller.GetRelayStatsDimensions)
-			relayStatsRoute.POST("/reset", controller.ResetRelayStats)
+			relayStatsRoute.DELETE("/reset", controller.ResetRelayStats)
 			relayStatsRoute.GET("/exclusion_rules", controller.GetStatsExclusionRules)
 			relayStatsRoute.PUT("/exclusion_rules", controller.UpdateStatsExclusionRules)
+			relayStatsRoute.GET("/score_weights", controller.GetStatsScoreWeights)
+			relayStatsRoute.PUT("/score_weights", controller.UpdateStatsScoreWeights)
 		}
 		ratioSyncRoute := apiRouter.Group("/ratio_sync")
 		ratioSyncRoute.Use(middleware.RootAuth())

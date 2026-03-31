@@ -1,6 +1,10 @@
 package service
 
-import "time"
+import (
+	"time"
+
+	"github.com/QuantumNous/new-api/setting/operation_setting"
+)
 
 // RelayIdentity carries the relay context fields needed by the stats tracker.
 // Defined in service to avoid importing relay/common (which would cause a cycle).
@@ -41,7 +45,12 @@ type relayStatsTracker struct {
 	groupOutcomes    []*groupOutcome
 }
 
+// NewRelayStatsTracker returns nil when stats are disabled, avoiding all
+// per-request allocations. All methods are nil-receiver safe.
 func NewRelayStatsTracker(requestID string, identity RelayIdentity, isAsync bool) *relayStatsTracker {
+	if !operation_setting.IsRelayStatsEnabled() {
+		return nil
+	}
 	return &relayStatsTracker{
 		collector:    GetRelayStatsCollector(),
 		identity:     identity,
@@ -64,7 +73,11 @@ func (t *relayStatsTracker) getOrCreateGroup(group string) *groupOutcome {
 // TrackAttempt collects an attempt event, updates internal counters.
 // The event's Excluded and ErrorLevel fields are populated by the collector
 // (via the ErrorClassifier) since the event is passed by pointer.
+// Nil-receiver safe: no-op when stats are disabled.
 func (t *relayStatsTracker) TrackAttempt(evt *AttemptEvent) {
+	if t == nil {
+		return
+	}
 	evt.IsAsync = t.isAsync
 	t.totalAttempts++
 
@@ -91,7 +104,11 @@ func (t *relayStatsTracker) TrackAttempt(evt *AttemptEvent) {
 // Complete emits per-group RequestCompleteEvents.
 // Groups tried before the final group are recorded as failures.
 // The last group gets the overall finalSuccess outcome.
+// Nil-receiver safe: no-op when stats are disabled.
 func (t *relayStatsTracker) Complete(finalSuccess bool) {
+	if t == nil {
+		return
+	}
 	for i, g := range t.groupOutcomes {
 		isLastGroup := i == len(t.groupOutcomes)-1
 		groupSuccess := isLastGroup && finalSuccess

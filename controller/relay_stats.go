@@ -6,7 +6,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/gin-gonic/gin"
 )
 
@@ -154,7 +156,7 @@ func GetRelayStatsDimensions(c *gin.Context) {
 //
 // Request:
 //
-//	POST /api/relay/stats/reset
+//	DELETE /api/relay/stats/reset
 //
 // Response:
 //
@@ -220,6 +222,47 @@ func UpdateStatsExclusionRules(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "rules updated",
+	})
+}
+
+// GetStatsScoreWeights returns the current channel health scoring weights.
+//
+// Request:
+//
+//	GET /api/relay/stats/score_weights
+//
+// Response:
+//
+//	{ "success": true, "data": ScoreWeights }
+func GetStatsScoreWeights(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data":    service.GetScoreWeights(),
+	})
+}
+
+// UpdateStatsScoreWeights replaces the current channel health scoring weights.
+//
+// Request:
+//
+//	PUT /api/relay/stats/score_weights
+//	Body: ScoreWeights (partial or full; merged with defaults)
+//
+// Response:
+//
+//	{ "success": true, "message": "score weights updated" }
+func UpdateStatsScoreWeights(c *gin.Context) {
+	var w service.ScoreWeights
+	if err := c.ShouldBindJSON(&w); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": err.Error()})
+		return
+	}
+	service.SetScoreWeights(w)
+	data, _ := common.Marshal(w)
+	operation_setting.StatsScoreWeightsFromString(string(data))
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "score weights updated",
 	})
 }
 

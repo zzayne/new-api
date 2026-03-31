@@ -115,8 +115,13 @@ func NewWindowBuffer(classifier ErrorClassifier, windowDuration time.Duration, o
 	return wb
 }
 
+// Stop halts the flush loop and performs a final flush so no data is lost.
 func (wb *WindowBuffer) Stop() {
 	close(wb.stopCh)
+	summaries := wb.Flush()
+	if wb.onFlush != nil && len(summaries) > 0 {
+		wb.onFlush(summaries)
+	}
 }
 
 func (wb *WindowBuffer) Reset() {
@@ -136,13 +141,15 @@ func (wb *WindowBuffer) flushLoop() {
 		if sleepDuration <= 0 {
 			sleepDuration = time.Millisecond
 		}
+		timer := time.NewTimer(sleepDuration)
 		select {
-		case <-time.After(sleepDuration):
+		case <-timer.C:
 			summaries := wb.Flush()
 			if wb.onFlush != nil && len(summaries) > 0 {
 				wb.onFlush(summaries)
 			}
 		case <-wb.stopCh:
+			timer.Stop()
 			return
 		}
 	}

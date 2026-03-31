@@ -1,11 +1,13 @@
 package service
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"gorm.io/gorm"
@@ -60,6 +62,8 @@ type AttemptEvent struct {
 	ErrorMessage       string        `json:"error_message,omitempty"`
 	ErrorLevel         int           `json:"error_level,omitempty"`
 	Duration           time.Duration `json:"duration_ns"`
+	// FirstTokenDuration is the time from attempt start to the first streaming chunk.
+	// Non-streaming requests leave this at zero.
 	FirstTokenDuration time.Duration `json:"first_token_duration_ns,omitempty"`
 	CompletionTokens   int           `json:"completion_tokens,omitempty"`
 	Excluded           bool          `json:"excluded"`
@@ -252,7 +256,14 @@ func GetErrorClassifier() ErrorClassifier             { classifierMu.RLock(); de
 // Safe wrappers — panics never affect business flow
 // ---------------------------------------------------------------------------
 
-func safeCollect(fn func()) { defer func() { recover() }(); fn() }
+func safeCollect(fn func()) {
+	defer func() {
+		if r := recover(); r != nil {
+			common.SysError(fmt.Sprintf("stats: panic in collector: %v", r))
+		}
+	}()
+	fn()
+}
 
 func SafeCollectAttempt(collector RelayStatsCollector, event *AttemptEvent) {
 	if !operation_setting.IsRelayStatsEnabled() {
@@ -286,14 +297,20 @@ const statsRetentionHours = 24 * 7 // 7 days
 const statsCleanupRetentionDays = 7
 
 func InitRelayStats() {
+	// Always register callbacks so runtime toggle from disabled→enabled works.
+	operation_setting.OnStatsExclusionRulesUpdate = StatsErrorExclusionRulesFromJSON
+	operation_setting.OnStatsScoreWeightsUpdate = UpdateScoreWeightsFromJSON
+
+	if !operation_setting.IsRelayStatsEnabled() {
+		// Keep noopCollector; no goroutines, no allocations.
+		return
+	}
+
 	classifier := NewRuleBasedClassifier(nil)
 	SetErrorClassifier(classifier)
 
 	collector := NewMemoryStatsCollector(classifier, defaultWindowDuration, defaultRingBufferSize)
 	SetRelayStatsCollector(collector)
-
-	operation_setting.OnStatsExclusionRulesUpdate = StatsErrorExclusionRulesFromJSON
-	operation_setting.OnStatsScoreWeightsUpdate = UpdateScoreWeightsFromJSON
 
 	if json := operation_setting.StatsErrorExclusionRulesJSON; json != "" && json != "[]" {
 		_ = StatsErrorExclusionRulesFromJSON(json)
@@ -304,7 +321,12 @@ func InitRelayStats() {
 }
 
 // SetupStatsPersistence wires up DB persistence. Called after DB is ready.
+// Skipped entirely when stats are disabled to avoid AutoMigrate, DB queries,
+// and cleanup goroutines.
 func SetupStatsPersistence(db *gorm.DB) {
+	if !operation_setting.IsRelayStatsEnabled() {
+		return
+	}
 	collector, ok := GetRelayStatsCollector().(*MemoryStatsCollector)
 	if !ok {
 		return

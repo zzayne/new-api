@@ -1,6 +1,7 @@
 package service
 
 import (
+	"sort"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -72,6 +73,7 @@ func (r *RingBuffer[T]) Snapshot(limit int) []T {
 
 func (r *RingBuffer[T]) Reset() {
 	r.mu.Lock()
+	r.buf = make([]T, r.cap)
 	r.head = 0
 	r.count = 0
 	r.mu.Unlock()
@@ -82,19 +84,19 @@ func (r *RingBuffer[T]) Reset() {
 // ---------------------------------------------------------------------------
 
 type atomicCounters struct {
-	totalRequests    atomic.Int64
-	successRequests  atomic.Int64
-	failedRequests   atomic.Int64
-	totalAttempts    atomic.Int64
-	successAttempts  atomic.Int64
-	failedAttempts   atomic.Int64
-	excludedAttempts atomic.Int64
-	retryRequests    atomic.Int64
-	retryRecovered   atomic.Int64
-	taskSubmitCount  atomic.Int64
+	totalRequests     atomic.Int64
+	successRequests   atomic.Int64
+	failedRequests    atomic.Int64
+	totalAttempts     atomic.Int64
+	successAttempts   atomic.Int64
+	failedAttempts    atomic.Int64
+	excludedAttempts  atomic.Int64
+	retryRequests     atomic.Int64
+	retryRecovered    atomic.Int64
+	taskSubmitCount   atomic.Int64
 	taskSubmitSuccess atomic.Int64
-	taskExecCount    atomic.Int64
-	taskExecSuccess  atomic.Int64
+	taskExecCount     atomic.Int64
+	taskExecSuccess   atomic.Int64
 }
 
 func (a *atomicCounters) snapshot() StatsCounters {
@@ -147,10 +149,11 @@ func (a *atomicCounters) reset() {
 // Raw events flow into a WindowBuffer; on flush, aggregated WindowSummary
 // records are pushed into a RingBuffer and persisted to DB.
 type MemoryStatsCollector struct {
-	windowBuf   *WindowBuffer
-	summaries   *RingBuffer[WindowSummary]
-	counters    atomicCounters
-	persistence StatsPersistence
+	windowBuf     *WindowBuffer
+	summaries     *RingBuffer[WindowSummary]
+	counters      atomicCounters
+	persistenceMu sync.RWMutex
+	persistence   StatsPersistence
 }
 
 func NewMemoryStatsCollector(classifier ErrorClassifier, windowDuration time.Duration, bufSize int) *MemoryStatsCollector {
@@ -162,16 +165,21 @@ func NewMemoryStatsCollector(classifier ErrorClassifier, windowDuration time.Dur
 }
 
 func (m *MemoryStatsCollector) SetPersistence(p StatsPersistence) {
+	m.persistenceMu.Lock()
 	m.persistence = p
+	m.persistenceMu.Unlock()
 }
 
 // LoadFromDB restores window summaries from the database into the RingBuffer.
 func (m *MemoryStatsCollector) LoadFromDB(retentionHours int) {
-	if m.persistence == nil {
+	m.persistenceMu.RLock()
+	p := m.persistence
+	m.persistenceMu.RUnlock()
+	if p == nil {
 		return
 	}
 	since := time.Now().Add(-time.Duration(retentionHours) * time.Hour)
-	summaries, err := m.persistence.LoadWindowSummaries(since, 0)
+	summaries, err := p.LoadWindowSummaries(since, 0)
 	if err != nil {
 		common.SysError("stats: failed to load summaries from DB: " + err.Error())
 		return
@@ -185,8 +193,11 @@ func (m *MemoryStatsCollector) LoadFromDB(retentionHours int) {
 // onWindowFlush is called by WindowBuffer after each time window.
 func (m *MemoryStatsCollector) onWindowFlush(summaries []WindowSummary) {
 	m.summaries.PushBatch(summaries)
-	if m.persistence != nil {
-		if err := m.persistence.SaveWindowSummaries(summaries); err != nil {
+	m.persistenceMu.RLock()
+	p := m.persistence
+	m.persistenceMu.RUnlock()
+	if p != nil {
+		if err := p.SaveWindowSummaries(summaries); err != nil {
 			common.SysError("stats: failed to persist window summaries: " + err.Error())
 		}
 	}
@@ -243,8 +254,14 @@ func (m *MemoryStatsCollector) GetCounters() StatsCounters {
 }
 
 func (m *MemoryStatsCollector) GetWindowSummaries(limit int) []WindowSummary {
-	result := m.summaries.Snapshot(limit)
-	result = append(result, m.windowBuf.Peek()...)
+	peeked := m.windowBuf.Peek()
+	// Reserve room for peeked (unflushed) data within the limit
+	flushedLimit := limit
+	if limit > 0 && limit > len(peeked) {
+		flushedLimit = limit - len(peeked)
+	}
+	result := m.summaries.Snapshot(flushedLimit)
+	result = append(result, peeked...)
 	return result
 }
 
@@ -452,12 +469,9 @@ func buildTimeSeriesPoints(windows []WindowSummary, metric string, interval time
 		points = append(points, TimeSeriesPoint{Time: t, Value: value})
 	}
 
-	// Sort by time
-	for i := 1; i < len(points); i++ {
-		for j := i; j > 0 && points[j].Time.Before(points[j-1].Time); j-- {
-			points[j], points[j-1] = points[j-1], points[j]
-		}
-	}
+	sort.Slice(points, func(i, j int) bool {
+		return points[i].Time.Before(points[j].Time)
+	})
 	return points
 }
 
@@ -618,12 +632,12 @@ func (a *windowAgg) toCounters() StatsCounters {
 		RetryRequests:     a.retryRequests,
 		RetryRecovered:    a.retryRecovered,
 		RecoveryRate:      recoveryRate,
-		TPS:              tps,
-		AvgOutputTPS:     avgOutputTPS,
-		AvgDurationMs:    avgDur,
-		AvgFirstTokenMs:  avgFT,
-		TaskExecCount:    a.taskExecCount,
-		TaskExecSuccess:  a.taskExecSuccess,
+		TPS:               tps,
+		AvgOutputTPS:      avgOutputTPS,
+		AvgDurationMs:     avgDur,
+		AvgFirstTokenMs:   avgFT,
+		TaskExecCount:     a.taskExecCount,
+		TaskExecSuccess:   a.taskExecSuccess,
 		AvgExecDurationMs: avgExec,
 	}
 }
