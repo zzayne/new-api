@@ -147,14 +147,22 @@ type StatsCounters struct {
 // ModelStats — user-facing, sanitized per-model statistics
 // ---------------------------------------------------------------------------
 
+// ModelStats holds per-model statistics exposed to end users.
+// Pointer fields (AvgDurationMs, AvgFirstTokenMs, TPS) are nil when no real
+// data exists, which marshals to JSON null — distinguishable from an actual
+// zero value by the frontend. HasData reports whether real traffic data was
+// collected; when false the other numeric fields carry optimistic defaults
+// (e.g. SuccessRate = 100).
 type ModelStats struct {
-	ModelName       string  `json:"model_name"`
-	SuccessRate     float64 `json:"success_rate"`
-	AvgDurationMs   float64 `json:"avg_duration_ms"`
-	AvgFirstTokenMs float64 `json:"avg_first_token_ms"`
-	TotalRequests   int64   `json:"total_requests"`
-	SuccessRequests int64   `json:"success_requests"`
-	FailedRequests  int64   `json:"failed_requests"`
+	ModelName       string   `json:"model_name"`
+	SuccessRate     float64  `json:"success_rate"`
+	AvgDurationMs   *float64 `json:"avg_duration_ms,omitempty"`
+	AvgFirstTokenMs *float64 `json:"avg_first_token_ms,omitempty"`
+	TPS             *float64 `json:"tps,omitempty"`
+	TotalRequests   int64    `json:"total_requests"`
+	SuccessRequests int64    `json:"success_requests"`
+	FailedRequests  int64    `json:"failed_requests"`
+	HasData         bool     `json:"has_data"`
 }
 
 // ---------------------------------------------------------------------------
@@ -334,6 +342,19 @@ func SetupStatsPersistence(db *gorm.DB) {
 	p := NewDBPersistence(db)
 	collector.SetPersistence(p)
 	collector.LoadFromDB(statsRetentionHours)
+
+	// Seed channel scores from historical logs for cold/rare models that have
+	// no recent window summary data. This runs after LoadFromDB so existing
+	// (real) summaries are already present in the ring buffer, allowing
+	// SeedFromLogs to skip combos that don't need seeding.
+	existing := collector.GetWindowSummaries(0)
+	seeds, err := SeedFromLogs(DefaultSeedLookbackDays, existing)
+	if err != nil {
+		common.SysError("stats: failed to seed from logs: " + err.Error())
+	} else if len(seeds) > 0 {
+		collector.InjectSeedSummaries(seeds)
+	}
+
 	_ = StartStatsCleanup(p, statsCleanupRetentionDays, 1*time.Hour)
 }
 

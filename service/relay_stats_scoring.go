@@ -18,6 +18,10 @@ type ScoreWeights struct {
 
 // SyncScoreConfig weights for synchronous (chat/completion) models.
 // Factors: success rate, error severity, TPS, first-token speed, recovery.
+//
+// BaselineScore is the score returned when a channel has no effective data
+// (effective attempts == 0). It is also blended with the computed score when
+// data is very sparse (< SparseThreshold attempts). Default 80.
 type SyncScoreConfig struct {
 	BaseWeight      float64        `json:"base_weight"`
 	SeverityMax     float64        `json:"severity_max"`
@@ -26,10 +30,14 @@ type SyncScoreConfig struct {
 	TPSWeight       float64        `json:"tps_weight"`
 	SpeedThresholds SpeedThreshold `json:"speed_thresholds"`
 	TPSThresholds   TPSThreshold   `json:"tps_thresholds"`
+	BaselineScore   float64        `json:"baseline_score"`
+	SparseThreshold int64          `json:"sparse_threshold"`
 }
 
 // AsyncScoreConfig weights for asynchronous (task) models.
 // Factors: submit success rate, submit speed, exec success rate, exec speed, recovery.
+//
+// BaselineScore and SparseThreshold work the same as in SyncScoreConfig.
 type AsyncScoreConfig struct {
 	SubmitBaseWeight      float64        `json:"submit_base_weight"`
 	SeverityMax           float64        `json:"severity_max"`
@@ -39,6 +47,8 @@ type AsyncScoreConfig struct {
 	ExecSpeedWeight       float64        `json:"exec_speed_weight"`
 	SubmitSpeedThresholds SpeedThreshold `json:"submit_speed_thresholds"`
 	ExecSpeedThresholds   SpeedThreshold `json:"exec_speed_thresholds"`
+	BaselineScore         float64        `json:"baseline_score"`
+	SparseThreshold       int64          `json:"sparse_threshold"`
 }
 
 type SpeedThreshold struct {
@@ -55,13 +65,23 @@ type TPSThreshold struct {
 	Slow      float64 `json:"slow"`
 }
 
+// defaultBaselineScore is the channel score returned when there is no effective
+// data, and the anchor value used for blending with sparse-data computed scores.
+const defaultBaselineScore = 80.0
+
+// defaultSparseThreshold is the minimum number of effective attempts required
+// before the computed score is trusted fully (no blending with baseline).
+const defaultSparseThreshold int64 = 5
+
 var defaultScoreWeights = ScoreWeights{
 	Sync: SyncScoreConfig{
-		BaseWeight:     40.0,
-		SeverityMax:    15.0,
-		RecoveryWeight: 5.0,
-		SpeedWeight:    25.0,
-		TPSWeight:      30.0,
+		BaseWeight:      40.0,
+		SeverityMax:     15.0,
+		RecoveryWeight:  5.0,
+		SpeedWeight:     25.0,
+		TPSWeight:       30.0,
+		BaselineScore:   defaultBaselineScore,
+		SparseThreshold: defaultSparseThreshold,
 		SpeedThresholds: SpeedThreshold{
 			ExcellentMs: 500,
 			GoodMs:      2000,
@@ -82,6 +102,8 @@ var defaultScoreWeights = ScoreWeights{
 		SubmitSpeedWeight: 15.0,
 		ExecSuccessWeight: 25.0,
 		ExecSpeedWeight:   25.0,
+		BaselineScore:     defaultBaselineScore,
+		SparseThreshold:   defaultSparseThreshold,
 		SubmitSpeedThresholds: SpeedThreshold{
 			ExcellentMs: 1000,
 			GoodMs:      3000,
@@ -147,15 +169,40 @@ func ComputeChannelScore(s WindowSummary) float64 {
 	return computeSyncScore(s)
 }
 
+// syncBaseline returns the configured baseline score, defaulting to
+// defaultBaselineScore when the config value is zero (unset).
+func syncBaseline(sc SyncScoreConfig) float64 {
+	if sc.BaselineScore > 0 {
+		return sc.BaselineScore
+	}
+	return defaultBaselineScore
+}
+
+// syncSparseThreshold returns the configured sparse threshold, defaulting to
+// defaultSparseThreshold when the config value is zero (unset).
+func syncSparseThreshold(sc SyncScoreConfig) int64 {
+	if sc.SparseThreshold > 0 {
+		return sc.SparseThreshold
+	}
+	return defaultSparseThreshold
+}
+
 // computeSyncScore evaluates: success rate, TPS, first-token/response speed, recovery.
 // AvgDurationMs is per-attempt per-channel, so retry across channels does not inflate it.
+//
+// When effective attempts == 0 the configured BaselineScore (default 80) is returned
+// instead of 100, because an untested channel should not start at perfect.
+// When effective attempts are below SparseThreshold the computed score is linearly
+// blended with the baseline so sparse data does not swing the score wildly.
 func computeSyncScore(s WindowSummary) float64 {
 	w := GetScoreWeights()
 	sc := w.Sync
+	baseline := syncBaseline(sc)
+	sparseThreshold := syncSparseThreshold(sc)
 
 	effective := s.TotalAttempts - s.ExcludedAttempts
 	if effective <= 0 {
-		return 100
+		return baseline
 	}
 
 	successRate := float64(s.SuccessAttempts) / float64(effective)
@@ -178,18 +225,47 @@ func computeSyncScore(s WindowSummary) float64 {
 	tpsBonus := tieredScoreHigherBetter(s.AvgOutputTPS, sc.TPSWeight, sc.TPSThresholds)
 
 	score := base - severityDeduction + recoveryBonus + speedBonus + tpsBonus
-	return math.Max(0, math.Min(100, score))
+	score = math.Max(0, math.Min(100, score))
+
+	// Blend with baseline when data is sparse to avoid overly confident scores.
+	if effective < sparseThreshold {
+		blend := float64(effective) / float64(sparseThreshold)
+		score = baseline*(1-blend) + score*blend
+	}
+	return score
+}
+
+// asyncBaseline returns the configured baseline score for async channels,
+// defaulting to defaultBaselineScore when the config value is zero (unset).
+func asyncBaseline(ac AsyncScoreConfig) float64 {
+	if ac.BaselineScore > 0 {
+		return ac.BaselineScore
+	}
+	return defaultBaselineScore
+}
+
+// asyncSparseThreshold returns the configured sparse threshold for async
+// channels, defaulting to defaultSparseThreshold when unset.
+func asyncSparseThreshold(ac AsyncScoreConfig) int64 {
+	if ac.SparseThreshold > 0 {
+		return ac.SparseThreshold
+	}
+	return defaultSparseThreshold
 }
 
 // computeAsyncScore evaluates: submit success rate, submit speed, exec success rate,
 // exec speed (duration), recovery.
+//
+// Baseline and sparse-blending behaviour mirrors computeSyncScore.
 func computeAsyncScore(s WindowSummary) float64 {
 	w := GetScoreWeights()
 	ac := w.Async
+	baseline := asyncBaseline(ac)
+	sparseThreshold := asyncSparseThreshold(ac)
 
 	effective := s.TotalAttempts - s.ExcludedAttempts
 	if effective <= 0 {
-		return 100
+		return baseline
 	}
 
 	successRate := float64(s.SuccessAttempts) / float64(effective)
@@ -215,7 +291,14 @@ func computeAsyncScore(s WindowSummary) float64 {
 	execSpeedBonus := tieredScore(s.AvgExecDurationMs, ac.ExecSpeedWeight, ac.ExecSpeedThresholds, true)
 
 	score := base - severityDeduction + recoveryBonus + submitSpeedBonus + execSuccessBonus + execSpeedBonus
-	return math.Max(0, math.Min(100, score))
+	score = math.Max(0, math.Min(100, score))
+
+	// Blend with baseline when data is sparse.
+	if effective < sparseThreshold {
+		blend := float64(effective) / float64(sparseThreshold)
+		score = baseline*(1-blend) + score*blend
+	}
+	return score
 }
 
 func computeSeverityDeduction(s WindowSummary, effective int64, severityMax float64, levelWeights [4]float64) float64 {

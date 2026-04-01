@@ -17,6 +17,11 @@ type WindowSummary struct {
 	ChannelID int    `json:"channel_id,omitempty"`
 	Group     string `json:"group,omitempty"`
 
+	// Seeded marks summaries that were synthetically generated from historical
+	// log data during startup (cold-start seeding). Admin views may filter
+	// these out to show only real traffic data.
+	Seeded bool `json:"seeded,omitempty"`
+
 	// Attempt-level (sync + async submit)
 	TotalAttempts        int64      `json:"total_attempts"`
 	AsyncAttempts        int64      `json:"async_attempts"`

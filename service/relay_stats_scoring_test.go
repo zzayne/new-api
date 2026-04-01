@@ -45,14 +45,14 @@ func TestComputeChannelScore_SyncModel_NoData(t *testing.T) {
 	t.Parallel()
 	s := WindowSummary{TotalAttempts: 0}
 	score := ComputeChannelScore(s)
-	assert.Equal(t, 100.0, score, "no data should return 100")
+	assert.Equal(t, defaultBaselineScore, score, "no data should return baseline score (80), not 100")
 }
 
 func TestComputeChannelScore_SyncModel_AllExcluded(t *testing.T) {
 	t.Parallel()
 	s := WindowSummary{TotalAttempts: 10, ExcludedAttempts: 10}
 	score := ComputeChannelScore(s)
-	assert.Equal(t, 100.0, score, "all excluded should return 100")
+	assert.Equal(t, defaultBaselineScore, score, "all excluded should return baseline score (80), not 100")
 }
 
 func TestComputeChannelScore_SyncUsesFirstTokenMs(t *testing.T) {
@@ -117,6 +117,103 @@ func TestComputeChannelScore_AsyncDetection(t *testing.T) {
 
 	assert.True(t, asyncScore > 0 && asyncScore <= 100)
 	assert.True(t, syncScore > 0 && syncScore <= 100)
+}
+
+// =============================================================================
+// Baseline score and sparse-blending tests
+// =============================================================================
+
+func TestComputeChannelScore_SyncModel_BaselineDefault(t *testing.T) {
+	t.Parallel()
+	// No data → should return exactly the default baseline (80), not 100.
+	s := WindowSummary{TotalAttempts: 0}
+	score := ComputeChannelScore(s)
+	assert.Equal(t, 80.0, score, "no-data channel should score 80 (baseline), not 100")
+}
+
+func TestComputeChannelScore_AsyncModel_NoData_ReturnsBaseline(t *testing.T) {
+	t.Parallel()
+	s := WindowSummary{TotalAttempts: 0, AsyncAttempts: 0}
+	score := computeAsyncScore(s)
+	assert.Equal(t, defaultBaselineScore, score,
+		"async no-data should return baseline %.1f, got %f", defaultBaselineScore, score)
+}
+
+func TestComputeChannelScore_CustomBaselineScore(t *testing.T) {
+	orig := GetScoreWeights()
+	defer SetScoreWeights(orig)
+
+	w := orig
+	w.Sync.BaselineScore = 70.0
+	w.Sync.SparseThreshold = 10
+	SetScoreWeights(w)
+
+	// No data → custom baseline
+	s := WindowSummary{TotalAttempts: 0}
+	score := ComputeChannelScore(s)
+	assert.Equal(t, 70.0, score, "custom baseline 70 should be returned for no-data channel")
+}
+
+func TestComputeChannelScore_SparseBlending_PartialTrust(t *testing.T) {
+	t.Parallel()
+	orig := GetScoreWeights()
+	defer SetScoreWeights(orig)
+
+	w := orig
+	w.Sync.BaselineScore = 80.0
+	w.Sync.SparseThreshold = 10
+	SetScoreWeights(w)
+
+	// 5 out of 10 threshold: blend = 0.5
+	// 100% success, fast speed → computed score near max
+	// Expected: somewhere between 80 (baseline) and computed (high)
+	s := WindowSummary{
+		TotalAttempts:   5,
+		AsyncAttempts:   0,
+		SuccessAttempts: 5,
+		AvgDurationMs:   300,
+		AvgOutputTPS:    80,
+	}
+	score := ComputeChannelScore(s)
+	assert.True(t, score > 80.0 && score <= 100.0,
+		"sparse blended score should be between baseline and full score, got %f", score)
+}
+
+func TestComputeChannelScore_SparseBlending_1Attempt(t *testing.T) {
+	t.Parallel()
+	orig := GetScoreWeights()
+	defer SetScoreWeights(orig)
+
+	w := orig
+	w.Sync.BaselineScore = 80.0
+	w.Sync.SparseThreshold = 5
+	SetScoreWeights(w)
+
+	// 1 success out of 5 threshold: blend = 0.2
+	// Score should be close to baseline (20% computed, 80% baseline)
+	s := WindowSummary{
+		TotalAttempts:   1,
+		SuccessAttempts: 1,
+		AvgDurationMs:   300,
+		AvgOutputTPS:    80,
+	}
+	score := ComputeChannelScore(s)
+	// blend=0.2: score ≈ 80*0.8 + high*0.2
+	assert.True(t, score >= 80.0, "should be at least baseline since 100%% success, got %f", score)
+	assert.True(t, score <= 100.0, "should not exceed 100, got %f", score)
+}
+
+func TestComputeChannelScore_FullData_NoBlending(t *testing.T) {
+	t.Parallel()
+	// With >= sparseThreshold (5) effective attempts, no blending occurs.
+	s := WindowSummary{
+		TotalAttempts:   100,
+		SuccessAttempts: 100,
+		AvgDurationMs:   300,
+		AvgOutputTPS:    80,
+	}
+	score := ComputeChannelScore(s)
+	assert.True(t, score >= 80, "full data should score high, got %f", score)
 }
 
 // =============================================================================

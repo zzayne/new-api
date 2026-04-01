@@ -518,3 +518,95 @@ func TestGetTimeSeries_Basic(t *testing.T) {
 	assert.Equal(t, "model", result.GroupBy)
 	assert.True(t, len(result.Series) > 0, "should have at least one series")
 }
+
+// =============================================================================
+// ModelStats pointer fields and HasData tests
+// =============================================================================
+
+func TestGetModelStats_WithData_PointerFieldsSet(t *testing.T) {
+	t.Parallel()
+	c := newTestCollector(nil)
+
+	// Provide 5 successful attempts with duration so avg_duration is computed
+	for i := 0; i < 5; i++ {
+		c.CollectAttempt(&AttemptEvent{
+			ModelName: "gpt-4", ChannelID: 1,
+			Success: true, Duration: 1 * time.Second, CompletionTokens: 100,
+		})
+	}
+	flushWindows(c)
+
+	stats := c.GetModelStats(0, 0)
+	require.Len(t, stats, 1)
+	s := stats[0]
+
+	assert.Equal(t, "gpt-4", s.ModelName)
+	assert.True(t, s.HasData, "HasData should be true when data exists")
+	assert.NotNil(t, s.AvgDurationMs, "AvgDurationMs should be non-nil when attempts exist")
+	assert.NotNil(t, s.TPS, "TPS should be non-nil when completion tokens exist")
+	assert.InDelta(t, 100.0, s.SuccessRate, 0.1, "100%% success")
+}
+
+func TestGetModelStats_WithFirstTokenData(t *testing.T) {
+	t.Parallel()
+	c := newTestCollector(nil)
+
+	c.CollectAttempt(&AttemptEvent{
+		ModelName: "claude-3", ChannelID: 1,
+		Success: true, Duration: 2 * time.Second, FirstTokenDuration: 500 * time.Millisecond,
+	})
+	flushWindows(c)
+
+	stats := c.GetModelStats(0, 0)
+	require.Len(t, stats, 1)
+	s := stats[0]
+
+	assert.NotNil(t, s.AvgFirstTokenMs, "AvgFirstTokenMs should be non-nil when first-token data exists")
+	assert.InDelta(t, 500.0, *s.AvgFirstTokenMs, 10.0, "first token ms should be ~500")
+}
+
+func TestGetModelStats_NoFirstToken_NilFirstTokenField(t *testing.T) {
+	t.Parallel()
+	c := newTestCollector(nil)
+
+	// Attempt with no first-token duration (non-streaming)
+	c.CollectAttempt(&AttemptEvent{
+		ModelName: "gpt-3.5", ChannelID: 1,
+		Success: true, Duration: 1 * time.Second,
+	})
+	flushWindows(c)
+
+	stats := c.GetModelStats(0, 0)
+	require.Len(t, stats, 1)
+	assert.Nil(t, stats[0].AvgFirstTokenMs, "AvgFirstTokenMs should be nil when no streaming data")
+}
+
+func TestGetModelStats_NoAttempts_NilDuration(t *testing.T) {
+	t.Parallel()
+	c := newTestCollector(nil)
+
+	// Collect a request complete event without any attempt (edge case)
+	c.CollectRequestComplete(RequestCompleteEvent{
+		FinalSuccess: true, TotalAttempts: 0,
+	})
+	flushWindows(c)
+
+	// No model data → empty result
+	stats := c.GetModelStats(0, 0)
+	assert.Empty(t, stats, "no model data should return empty stats")
+}
+
+func TestGetModelStats_HasData_False_ForZeroTrafficModels(t *testing.T) {
+	// When constructing a zero-traffic ModelStats entry (as the controller does),
+	// HasData should be false and pointer fields should be nil.
+	zero := ModelStats{
+		ModelName:   "some-model",
+		SuccessRate: 100,
+		HasData:     false,
+	}
+	assert.False(t, zero.HasData)
+	assert.Nil(t, zero.AvgDurationMs)
+	assert.Nil(t, zero.AvgFirstTokenMs)
+	assert.Nil(t, zero.TPS)
+	assert.Equal(t, 100.0, zero.SuccessRate)
+}

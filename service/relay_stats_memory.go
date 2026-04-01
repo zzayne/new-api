@@ -170,6 +170,19 @@ func (m *MemoryStatsCollector) SetPersistence(p StatsPersistence) {
 	m.persistenceMu.Unlock()
 }
 
+// InjectSeedSummaries pushes synthetically generated (seeded) WindowSummary
+// records into the ring buffer. Seeded summaries are marked with Seeded=true
+// so callers can distinguish them from real traffic data.
+// This should be called after LoadFromDB so that real persisted summaries
+// already exist in the buffer and SeedFromLogs can avoid duplicating them.
+func (m *MemoryStatsCollector) InjectSeedSummaries(seeds []WindowSummary) {
+	if len(seeds) == 0 {
+		return
+	}
+	m.summaries.PushBatch(seeds)
+	common.SysLog("stats: injected " + strconv.Itoa(len(seeds)) + " seeded window summaries from log history")
+}
+
 // LoadFromDB restores window summaries from the database into the RingBuffer.
 func (m *MemoryStatsCollector) LoadFromDB(retentionHours int) {
 	m.persistenceMu.RLock()
@@ -353,21 +366,26 @@ func (m *MemoryStatsCollector) GetTimeSeries(query TimeSeriesQuery) TimeSeriesRe
 
 // GetModelStats returns user-facing per-model statistics aggregated from
 // window summaries within the given unix timestamp range (0 = no filter).
+// Only models that have actual traffic data are returned; callers that wish to
+// include supported models with zero traffic should merge the result with a
+// list of enabled models and add zero-data entries (HasData=false) for gaps.
 func (m *MemoryStatsCollector) GetModelStats(startTime, endTime int64) []ModelStats {
 	windows := m.summaries.Snapshot(0)
 	// Include current unflushed window so data is real-time
 	windows = append(windows, m.windowBuf.Peek()...)
 
 	type modelAgg struct {
-		totalAttempts     int64
-		successAttempts   int64
-		excludedAttempts  int64
-		totalDurationNs   int64
-		totalFirstTokenNs int64
-		firstTokenCount   int64
-		totalRequests     int64
-		successRequests   int64
-		failedRequests    int64
+		totalAttempts         int64
+		successAttempts       int64
+		excludedAttempts      int64
+		totalDurationNs       int64
+		totalFirstTokenNs     int64
+		firstTokenCount       int64
+		totalCompletionTokens int64
+		successDurationNs     int64
+		totalRequests         int64
+		successRequests       int64
+		failedRequests        int64
 	}
 	buckets := make(map[string]*modelAgg)
 
@@ -392,6 +410,8 @@ func (m *MemoryStatsCollector) GetModelStats(startTime, endTime int64) []ModelSt
 		agg.totalDurationNs += w.TotalDurationNs
 		agg.totalFirstTokenNs += w.TotalFirstTokenNs
 		agg.firstTokenCount += w.FirstTokenCount
+		agg.totalCompletionTokens += w.TotalCompletionTokens
+		agg.successDurationNs += w.SuccessDurationNs
 		agg.totalRequests += w.TotalRequests
 		agg.successRequests += w.SuccessRequests
 		agg.failedRequests += w.FailedRequests
@@ -399,29 +419,43 @@ func (m *MemoryStatsCollector) GetModelStats(startTime, endTime int64) []ModelSt
 
 	result := make([]ModelStats, 0, len(buckets))
 	for model, agg := range buckets {
-		// User-facing success rate = final request outcome, not per-attempt
+		// User-facing success rate = final request outcome, not per-attempt.
+		// Default to 100 (optimistic) when no request data.
 		var successRate float64
 		if agg.totalRequests > 0 {
 			successRate = float64(agg.successRequests) / float64(agg.totalRequests) * 100
 		} else {
 			successRate = 100
 		}
-		var avgDur float64
+
+		// Use pointer fields so the frontend can distinguish "no data" (null)
+		// from "actually zero" (0).
+		var avgDurPtr *float64
 		if agg.totalAttempts > 0 {
-			avgDur = float64(agg.totalDurationNs) / float64(agg.totalAttempts) / 1e6
+			v := float64(agg.totalDurationNs) / float64(agg.totalAttempts) / 1e6
+			avgDurPtr = &v
 		}
-		var avgFT float64
+		var avgFTPtr *float64
 		if agg.firstTokenCount > 0 {
-			avgFT = float64(agg.totalFirstTokenNs) / float64(agg.firstTokenCount) / 1e6
+			v := float64(agg.totalFirstTokenNs) / float64(agg.firstTokenCount) / 1e6
+			avgFTPtr = &v
 		}
+		var tpsPtr *float64
+		if agg.totalCompletionTokens > 0 && agg.successDurationNs > 0 {
+			v := float64(agg.totalCompletionTokens) / (float64(agg.successDurationNs) / 1e9)
+			tpsPtr = &v
+		}
+
 		result = append(result, ModelStats{
 			ModelName:       model,
 			SuccessRate:     successRate,
-			AvgDurationMs:   avgDur,
-			AvgFirstTokenMs: avgFT,
+			AvgDurationMs:   avgDurPtr,
+			AvgFirstTokenMs: avgFTPtr,
+			TPS:             tpsPtr,
 			TotalRequests:   agg.totalRequests,
 			SuccessRequests: agg.successRequests,
 			FailedRequests:  agg.failedRequests,
+			HasData:         true,
 		})
 	}
 	return result

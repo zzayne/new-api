@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/gin-gonic/gin"
@@ -293,6 +294,10 @@ func UpdateStatsScoreWeights(c *gin.Context) {
 //	    }
 //	  ]
 //	}
+// GetUserModelStats returns per-model statistics visible to authenticated users.
+// Models that are enabled but have no traffic data are included with
+// success_rate=100 (optimistic default) and null numeric metrics so the
+// frontend can display them with a "no data yet" indicator.
 func GetUserModelStats(c *gin.Context) {
 	startTimestamp, _ := strconv.ParseInt(c.Query("start_timestamp"), 10, 64)
 	endTimestamp, _ := strconv.ParseInt(c.Query("end_timestamp"), 10, 64)
@@ -302,6 +307,25 @@ func GetUserModelStats(c *gin.Context) {
 	if stats == nil {
 		stats = []service.ModelStats{}
 	}
+
+	// Cross-reference with the enabled models list so that supported models
+	// with zero traffic still appear in the response with optimistic defaults.
+	statsSet := make(map[string]struct{}, len(stats))
+	for _, s := range stats {
+		statsSet[s.ModelName] = struct{}{}
+	}
+	enabledModels := model.GetEnabledModels()
+	for _, m := range enabledModels {
+		if _, exists := statsSet[m]; !exists {
+			stats = append(stats, service.ModelStats{
+				ModelName:   m,
+				SuccessRate: 100,
+				HasData:     false,
+				// AvgDurationMs, AvgFirstTokenMs, TPS remain nil → JSON null
+			})
+		}
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"data":    stats,
