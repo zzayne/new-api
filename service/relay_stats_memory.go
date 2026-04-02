@@ -267,15 +267,9 @@ func (m *MemoryStatsCollector) GetCounters() StatsCounters {
 }
 
 func (m *MemoryStatsCollector) GetWindowSummaries(limit int) []WindowSummary {
-	peeked := m.windowBuf.Peek()
-	// Reserve room for peeked (unflushed) data within the limit
-	flushedLimit := limit
-	if limit > 0 && limit > len(peeked) {
-		flushedLimit = limit - len(peeked)
-	}
-	result := m.summaries.Snapshot(flushedLimit)
-	result = append(result, peeked...)
-	return result
+	windows := m.summaries.Snapshot(0)
+	windows = append(windows, m.windowBuf.Peek()...)
+	return limitWindowSummaries(windows, limit)
 }
 
 func (m *MemoryStatsCollector) AggregateWindows(dimensions []string) map[string]StatsCounters {
@@ -390,6 +384,9 @@ func (m *MemoryStatsCollector) GetModelStats(startTime, endTime int64) []ModelSt
 	buckets := make(map[string]*modelAgg)
 
 	for _, w := range windows {
+		if w.Seeded {
+			continue
+		}
 		if startTime > 0 && w.WindowEnd.Unix() < startTime {
 			continue
 		}
@@ -570,6 +567,63 @@ func max64(a, b int64) int64 {
 		return a
 	}
 	return b
+}
+
+func sortWindowSummariesByTime(windows []WindowSummary) {
+	sort.SliceStable(windows, func(i, j int) bool {
+		if !windows[i].WindowEnd.Equal(windows[j].WindowEnd) {
+			return windows[i].WindowEnd.Before(windows[j].WindowEnd)
+		}
+		if !windows[i].WindowStart.Equal(windows[j].WindowStart) {
+			return windows[i].WindowStart.Before(windows[j].WindowStart)
+		}
+		if windows[i].Seeded != windows[j].Seeded {
+			return !windows[i].Seeded && windows[j].Seeded
+		}
+		if windows[i].ModelName != windows[j].ModelName {
+			return windows[i].ModelName < windows[j].ModelName
+		}
+		if windows[i].ChannelID != windows[j].ChannelID {
+			return windows[i].ChannelID < windows[j].ChannelID
+		}
+		return windows[i].Group < windows[j].Group
+	})
+}
+
+func limitWindowSummaries(windows []WindowSummary, limit int) []WindowSummary {
+	if len(windows) == 0 {
+		return nil
+	}
+
+	sortWindowSummariesByTime(windows)
+	if limit <= 0 || len(windows) <= limit {
+		return windows
+	}
+
+	real := make([]WindowSummary, 0, len(windows))
+	seeded := make([]WindowSummary, 0)
+	for _, w := range windows {
+		if w.Seeded {
+			seeded = append(seeded, w)
+			continue
+		}
+		real = append(real, w)
+	}
+
+	if len(real) >= limit {
+		return append([]WindowSummary(nil), real[len(real)-limit:]...)
+	}
+
+	selected := append([]WindowSummary(nil), real...)
+	remaining := limit - len(selected)
+	if remaining > len(seeded) {
+		remaining = len(seeded)
+	}
+	if remaining > 0 {
+		selected = append(selected, seeded[len(seeded)-remaining:]...)
+		sortWindowSummariesByTime(selected)
+	}
+	return selected
 }
 
 // ---------------------------------------------------------------------------

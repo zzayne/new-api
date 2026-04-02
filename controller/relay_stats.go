@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
-	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/gin-gonic/gin"
@@ -294,6 +293,7 @@ func UpdateStatsScoreWeights(c *gin.Context) {
 //	    }
 //	  ]
 //	}
+//
 // GetUserModelStats returns per-model statistics visible to authenticated users.
 // Models that are enabled but have no traffic data are included with
 // success_rate=100 (optimistic default) and null numeric metrics so the
@@ -308,28 +308,39 @@ func GetUserModelStats(c *gin.Context) {
 		stats = []service.ModelStats{}
 	}
 
-	// Cross-reference with the enabled models list so that supported models
-	// with zero traffic still appear in the response with optimistic defaults.
-	statsSet := make(map[string]struct{}, len(stats))
-	for _, s := range stats {
-		statsSet[s.ModelName] = struct{}{}
+	visibleModels, err := resolveVisibleModelNames(c)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"message": "get user group failed",
+		})
+		return
 	}
-	enabledModels := model.GetEnabledModels()
-	for _, m := range enabledModels {
-		if _, exists := statsSet[m]; !exists {
-			stats = append(stats, service.ModelStats{
-				ModelName:   m,
-				SuccessRate: 100,
-				HasData:     false,
-				// AvgDurationMs, AvgFirstTokenMs, TPS remain nil → JSON null
-			})
-		}
-	}
+	stats = appendZeroTrafficModelStats(stats, visibleModels)
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"data":    stats,
 	})
+}
+
+func appendZeroTrafficModelStats(stats []service.ModelStats, visibleModels []string) []service.ModelStats {
+	statsSet := make(map[string]struct{}, len(stats))
+	for _, s := range stats {
+		statsSet[s.ModelName] = struct{}{}
+	}
+	for _, modelName := range visibleModels {
+		if _, exists := statsSet[modelName]; exists {
+			continue
+		}
+		stats = append(stats, service.ModelStats{
+			ModelName:   modelName,
+			SuccessRate: 100,
+			HasData:     false,
+			// AvgDurationMs, AvgFirstTokenMs, TPS remain nil → JSON null
+		})
+	}
+	return stats
 }
 
 // parseDuration parses a human-friendly duration string like "5m", "1h", "24h", "7d".

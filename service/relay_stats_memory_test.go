@@ -272,6 +272,50 @@ func TestCollector_Reset(t *testing.T) {
 	assert.Nil(t, c.GetWindowSummaries(10))
 }
 
+func TestGetWindowSummaries_LimitPrefersRealWindowsOverSeeded(t *testing.T) {
+	t.Parallel()
+	c := newTestCollector(nil)
+
+	base := time.Now().Add(-2 * time.Hour).Truncate(time.Minute)
+	c.summaries.PushBatch([]WindowSummary{
+		{
+			WindowStart: base,
+			WindowEnd:   base.Add(5 * time.Minute),
+			ModelName:   "real-1",
+			ChannelID:   1,
+		},
+		{
+			WindowStart: base.Add(10 * time.Minute),
+			WindowEnd:   base.Add(15 * time.Minute),
+			ModelName:   "real-2",
+			ChannelID:   1,
+		},
+	})
+	c.InjectSeedSummaries([]WindowSummary{
+		{
+			WindowStart: base.Add(-24 * time.Hour),
+			WindowEnd:   time.Now(),
+			ModelName:   "seed-1",
+			ChannelID:   2,
+			Seeded:      true,
+		},
+		{
+			WindowStart: base.Add(-23 * time.Hour),
+			WindowEnd:   time.Now(),
+			ModelName:   "seed-2",
+			ChannelID:   3,
+			Seeded:      true,
+		},
+	})
+
+	got := c.GetWindowSummaries(2)
+	require.Len(t, got, 2)
+	assert.False(t, got[0].Seeded)
+	assert.False(t, got[1].Seeded)
+	assert.Equal(t, "real-1", got[0].ModelName)
+	assert.Equal(t, "real-2", got[1].ModelName)
+}
+
 func TestCollector_MixedScenario(t *testing.T) {
 	t.Parallel()
 	classifier := NewRuleBasedClassifier([]ErrorExclusionRule{
@@ -609,4 +653,36 @@ func TestGetModelStats_HasData_False_ForZeroTrafficModels(t *testing.T) {
 	assert.Nil(t, zero.AvgFirstTokenMs)
 	assert.Nil(t, zero.TPS)
 	assert.Equal(t, 100.0, zero.SuccessRate)
+}
+
+func TestGetModelStats_SkipsSeededSummaries(t *testing.T) {
+	t.Parallel()
+	c := newTestCollector(nil)
+
+	now := time.Now().Truncate(time.Minute)
+	c.summaries.PushBatch([]WindowSummary{
+		{
+			WindowStart:     now.Add(-10 * time.Minute),
+			WindowEnd:       now.Add(-5 * time.Minute),
+			ModelName:       "real-model",
+			ChannelID:       1,
+			TotalAttempts:   3,
+			SuccessAttempts: 3,
+			TotalDurationNs: int64(3 * time.Second),
+		},
+		{
+			WindowStart:     now.Add(-30 * 24 * time.Hour),
+			WindowEnd:       now,
+			ModelName:       "seed-model",
+			ChannelID:       2,
+			TotalAttempts:   50,
+			SuccessAttempts: 50,
+			TotalDurationNs: int64(50 * time.Second),
+			Seeded:          true,
+		},
+	})
+
+	stats := c.GetModelStats(0, 0)
+	require.Len(t, stats, 1)
+	assert.Equal(t, "real-model", stats[0].ModelName)
 }
