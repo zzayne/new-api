@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/model"
@@ -176,7 +177,27 @@ func UpdateMidjourneyTaskBulk() {
 				won, err := task.UpdateWithStatus(preStatus)
 				if err != nil {
 					logger.LogError(ctx, "UpdateMidjourneyTask task error: "+err.Error())
-				} else if won && shouldReturnQuota {
+				}
+				// Collect task execution stats when task reaches terminal state
+				isDone := task.Status == "SUCCESS" || task.Status == "FAILURE"
+				if won && isDone && preStatus != task.Status {
+					var execDur time.Duration
+					if task.FinishTime > 0 && task.SubmitTime > 0 {
+						execDur = time.Duration(task.FinishTime-task.SubmitTime) * time.Millisecond
+					}
+					service.SafeCollectTaskExecution(service.GetRelayStatsCollector(), service.TaskExecutionEvent{
+						TaskID:            task.MjId,
+						Platform:          constant.TaskPlatformMidjourney,
+						ModelName:         service.CovertMjpActionToModelName(task.Action),
+						ChannelID:         task.ChannelId,
+						Success:           task.Status == "SUCCESS",
+						FailReason:        task.FailReason,
+						SubmitTime:        task.SubmitTime,
+						FinishTime:        task.FinishTime,
+						ExecutionDuration: execDur,
+					})
+				}
+				if won && shouldReturnQuota {
 					err = model.IncreaseUserQuota(task.UserId, task.Quota, false)
 					if err != nil {
 						logger.LogError(ctx, "fail to increase user quota: "+err.Error())

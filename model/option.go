@@ -163,6 +163,9 @@ func InitOptionMap() {
 	common.OptionMap["AutomaticDisableKeywords"] = operation_setting.AutomaticDisableKeywordsToString()
 	common.OptionMap["AutomaticDisableStatusCodes"] = operation_setting.AutomaticDisableStatusCodesToString()
 	common.OptionMap["AutomaticRetryStatusCodes"] = operation_setting.AutomaticRetryStatusCodesToString()
+	common.OptionMap["RelayStatsEnabled"] = strconv.FormatBool(operation_setting.IsRelayStatsEnabled())
+	common.OptionMap["StatsErrorExclusionRules"] = operation_setting.StatsErrorExclusionRulesToString()
+	common.OptionMap["StatsScoreWeights"] = operation_setting.StatsScoreWeightsToString()
 	common.OptionMap["ExposeRatioEnabled"] = strconv.FormatBool(ratio_setting.IsExposeRatioEnabled())
 
 	// 自动添加所有注册的模型配置
@@ -312,6 +315,8 @@ func updateOptionMap(key string, value string) (err error) {
 			system_setting.WorkerAllowHttpImageRequestEnabled = boolValue
 		case "DefaultUseAutoGroup":
 			setting.DefaultUseAutoGroup = boolValue
+		case "RelayStatsEnabled":
+			operation_setting.SetRelayStatsEnabled(boolValue)
 		case "ExposeRatioEnabled":
 			ratio_setting.SetExposeRatioEnabled(boolValue)
 		}
@@ -500,6 +505,10 @@ func updateOptionMap(key string, value string) (err error) {
 		err = operation_setting.AutomaticDisableStatusCodesFromString(value)
 	case "AutomaticRetryStatusCodes":
 		err = operation_setting.AutomaticRetryStatusCodesFromString(value)
+	case "StatsErrorExclusionRules":
+		err = operation_setting.StatsErrorExclusionRulesFromString(value)
+	case "StatsScoreWeights":
+		err = operation_setting.StatsScoreWeightsFromString(value)
 	case "StreamCacheQueueLength":
 		setting.StreamCacheQueueLength, _ = strconv.Atoi(value)
 	case "PayMethods":

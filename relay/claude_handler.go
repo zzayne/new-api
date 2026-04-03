@@ -122,6 +122,9 @@ func ClaudeHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 			return newApiErr
 		}
 
+		if usage != nil {
+			common.SetContextKey(c, constant.ContextKeyCompletionTokens, usage.CompletionTokens)
+		}
 		service.PostTextConsumeQuota(c, info, usage, nil)
 		return nil
 	}
@@ -190,6 +193,9 @@ func ClaudeHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 		return newAPIError
 	}
 
+	if u, ok := usage.(*dto.Usage); ok && u != nil {
+		common.SetContextKey(c, constant.ContextKeyCompletionTokens, u.CompletionTokens)
+	}
 	service.PostTextConsumeQuota(c, info, usage.(*dto.Usage), nil)
 	return nil
 }
