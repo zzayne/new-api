@@ -194,6 +194,9 @@ func GeminiHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 		return openaiErr
 	}
 
+	if u, ok := usage.(*dto.Usage); ok && u != nil {
+		common.SetContextKey(c, constant.ContextKeyCompletionTokens, u.CompletionTokens)
+	}
 	service.PostTextConsumeQuota(c, info, usage.(*dto.Usage), nil)
 	return nil
 }
@@ -288,6 +291,9 @@ func GeminiEmbeddingHandler(c *gin.Context, info *relaycommon.RelayInfo) (newAPI
 		return openaiErr
 	}
 
+	if u, ok := usage.(*dto.Usage); ok && u != nil {
+		common.SetContextKey(c, constant.ContextKeyCompletionTokens, u.CompletionTokens)
+	}
 	service.PostTextConsumeQuota(c, info, usage.(*dto.Usage), nil)
 	return nil
 }

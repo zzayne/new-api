@@ -135,6 +135,10 @@ func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 	}
 
 	usageDto := usage.(*dto.Usage)
+	if usageDto != nil {
+		common.SetContextKey(c, appconstant.ContextKeyCompletionTokens, usageDto.CompletionTokens)
+	}
+
 	if info.RelayMode == relayconstant.RelayModeResponsesCompact {
 		originModelName := info.OriginModelName
 		originPriceData := info.PriceData
