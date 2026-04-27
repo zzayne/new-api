@@ -201,6 +201,36 @@ func SetApiRouter(router *gin.Engine) {
 			performanceRoute.GET("/logs", controller.GetLogFiles)
 			performanceRoute.DELETE("/logs", controller.CleanupLogFiles)
 		}
+		// Relay statistics APIs.
+		// User-facing per-model stats (sanitized: no channel ids, names or scores).
+		// Exposes final request success_rate, avg_duration_ms, tps, and
+		// p50_first_token_ms (streaming-only median TTFT) for models visible to
+		// the current user.
+		apiRouter.GET("/relay/stats/models", middleware.UserAuth(), controller.GetUserModelStats)
+		// Admin-only relay stats group (RootAuth). Used by the admin dashboard to
+		// observe traffic, error classification, channel health scoring, and to
+		// tune the scoring/classification rules at runtime.
+		relayStatsRoute := apiRouter.Group("/relay/stats")
+		relayStatsRoute.Use(middleware.RootAuth())
+		{
+			// Lifetime aggregated counters across all traffic since process start.
+			relayStatsRoute.GET("/", controller.GetRelayStats)
+			// Recent per-bucket 5-minute window summaries (model x channel x group).
+			relayStatsRoute.GET("/windows", controller.GetRelayStatsWindows)
+			// Time-series data points for trend charts (group_by / metric / interval / range).
+			relayStatsRoute.GET("/timeseries", controller.GetRelayStatsTimeSeries)
+			// Cross-tab aggregation of windows grouped by one or more dimensions.
+			relayStatsRoute.GET("/dimensions", controller.GetRelayStatsDimensions)
+			// Clear all in-memory counters and windows (does not delete persisted rows).
+			relayStatsRoute.DELETE("/reset", controller.ResetRelayStats)
+			// Read/replace the error classification + exclusion rules used to
+			// decide which failures count as "real" errors vs excluded (e.g. 4xx).
+			relayStatsRoute.GET("/exclusion_rules", controller.GetStatsExclusionRules)
+			relayStatsRoute.PUT("/exclusion_rules", controller.UpdateStatsExclusionRules)
+			// Read/replace the weights used to compute the 0..100 channel health score.
+			relayStatsRoute.GET("/score_weights", controller.GetStatsScoreWeights)
+			relayStatsRoute.PUT("/score_weights", controller.UpdateStatsScoreWeights)
+		}
 		ratioSyncRoute := apiRouter.Group("/ratio_sync")
 		ratioSyncRoute.Use(middleware.RootAuth())
 		{

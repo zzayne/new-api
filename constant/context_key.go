@@ -66,4 +66,6 @@ const (
 	// ContextKeyLanguage stores the user's language preference for i18n
 	ContextKeyLanguage ContextKey = "language"
 	ContextKeyIsStream ContextKey = "is_stream"
+		// ContextKeyCompletionTokens stores the completion token count from the relay handler
+	ContextKeyCompletionTokens ContextKey = "stats_completion_tokens"
 )
